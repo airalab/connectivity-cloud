@@ -93,5 +93,5 @@ Use `REJECTION_CODES` from `@scp/core` to reference these codes in your code:
 - **whitelist**: Alternative authentication provider - maintains static sensor whitelist in Redis, bypassing blockchain dependency for simpler deployments.
 - **pubsub-broadcaster**: Consumes `telemetry.authorized.v1`, publishes to libp2p/GossipSub for real-time web UI, emits `telemetry.pubsub.result.v1`, routes exhausted failures to DLQ.
 - **heartbeat-tracker**: Observability-only consumer of `telemetry.authorized.v1`, tracks sensor liveness (`firstSeen`, `lastSeen`, `onlineSince`) in Redis, exposes `sensors_online` count and per-sensor/aggregate uptime metrics over configurable online window (default 30s). Does not emit result events or participate in retry/DLQ.
-- **ipfs-publisher**: Consumes `telemetry.authorized.v1`, batches and publishes to IPFS (stubbed), emits `telemetry.ipfs.result.v1`.
-- **blockchain-anchor**: Consumes `telemetry.ipfs.result.v1`, deduplicates by CID, emits `telemetry.blockchain.result.v1`; phase-1 scope is CID-only anchoring (stubbed).
+- **ipfs-publisher**: Consumes `telemetry.authorized.v1`, batches and publishes to IPFS, emits `telemetry.ipfs.result.v1`.
+- **blockchain-anchor**: Consumes `telemetry.ipfs.result.v1`, deduplicates by CID, emits `telemetry.blockchain.result.v1`.
