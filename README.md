@@ -1,4 +1,4 @@
-# Sensors.social Connectivity monorepo
+# Connectivity Service Monorepo
 
 TypeScript monorepo for the event-driven telemetry pipeline described in:
 
