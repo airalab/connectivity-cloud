@@ -255,9 +255,9 @@ importers:
 
   packages/core:
     dependencies:
-      '@buf/airalab_sensors-social-proto.bufbuild_es':
-        specifier: 2.14.0-20260815104319-7f23b240b94d.1
-        version: 2.14.0-20260815104319-7f23b240b94d.1(@bufbuild/protobuf@2.14.0)
+      '@buf/airalab_connectivity-protocol.bufbuild_es':
+        specifier: 2.14.0-20260828134001-309d77314e7b.1
+        version: 2.14.0-20260828134001-309d77314e7b.1(@bufbuild/protobuf@2.14.0)
       '@bufbuild/protobuf':
         specifier: ^2.14.0
         version: 2.14.0
@@ -271,9 +271,9 @@ importers:
 
   services/blockchain-anchor:
     dependencies:
-      '@buf/airalab_sensors-social-proto.bufbuild_es':
-        specifier: 2.14.0-20260815104319-7f23b240b94d.1
-        version: 2.14.0-20260815104319-7f23b240b94d.1(@bufbuild/protobuf@2.14.0)
+      '@buf/airalab_connectivity-protocol.bufbuild_es':
+        specifier: 2.14.0-20260828134001-309d77314e7b.1
+        version: 2.14.0-20260828134001-309d77314e7b.1(@bufbuild/protobuf@2.14.0)
       '@platformatic/kafka':
         specifier: ^2.9.0
         version: 2.9.0(supports-color@10.2.2)
@@ -327,9 +327,9 @@ importers:
         specifier: ^10.3.1
         version: 10.3.1
     devDependencies:
-      '@buf/airalab_sensors-social-proto.bufbuild_es':
-        specifier: 2.14.0-20260815104319-7f23b240b94d.1
-        version: 2.14.0-20260815104319-7f23b240b94d.1(@bufbuild/protobuf@2.14.0)
+      '@buf/airalab_connectivity-protocol.bufbuild_es':
+        specifier: 2.14.0-20260828134001-309d77314e7b.1
+        version: 2.14.0-20260828134001-309d77314e7b.1(@bufbuild/protobuf@2.14.0)
       '@bufbuild/protobuf':
         specifier: ^2.14.0
         version: 2.14.0
@@ -370,9 +370,9 @@ importers:
 
   services/ipfs-publisher:
     dependencies:
-      '@buf/airalab_sensors-social-proto.bufbuild_es':
-        specifier: 2.14.0-20260815104319-7f23b240b94d.1
-        version: 2.14.0-20260815104319-7f23b240b94d.1(@bufbuild/protobuf@2.14.0)
+      '@buf/airalab_connectivity-protocol.bufbuild_es':
+        specifier: 2.14.0-20260828134001-309d77314e7b.1
+        version: 2.14.0-20260828134001-309d77314e7b.1(@bufbuild/protobuf@2.14.0)
       '@napi-rs/lzma':
         specifier: ^1.5.1
         version: 1.5.1
@@ -473,9 +473,9 @@ importers:
 
   tools/fake-sensor-cli:
     dependencies:
-      '@buf/airalab_sensors-social-proto.bufbuild_es':
-        specifier: 2.14.0-20260815104319-7f23b240b94d.1
-        version: 2.14.0-20260815104319-7f23b240b94d.1(@bufbuild/protobuf@2.14.0)
+      '@buf/airalab_connectivity-protocol.bufbuild_es':
+        specifier: 2.14.0-20260828134001-309d77314e7b.1
+        version: 2.14.0-20260828134001-309d77314e7b.1(@bufbuild/protobuf@2.14.0)
       '@bufbuild/protobuf':
         specifier: ^2.14.0
         version: 2.14.0
@@ -498,8 +498,8 @@ importers:
 
 packages:
 
-  '@buf/airalab_sensors-social-proto.bufbuild_es@2.14.0-20260815104319-7f23b240b94d.1':
-    resolution: {integrity: sha512-H9nhqpcO0KgwISCwI36LAB84FDciqGfZk6MKNYGC1rmXZw1Ph9B2ZU7YReeIht6o4AXTsGXY/O6lrEiURM/49A==}
+  '@buf/airalab_connectivity-protocol.bufbuild_es@2.14.0-20260828134001-309d77314e7b.1':
+    resolution: {integrity: sha512-HhnH5fFygClIZa0joU/cyu6u1rHyRSHM/uwY2vvpCwnufqM0/oPrSDDjllVkOSK4boG+Mnclnpj06uGOwrsFrw==}
     peerDependencies:
       '@bufbuild/protobuf': ^2.14.0
 
@@ -2944,7 +2944,7 @@ packages:
 
 snapshots:
 
-  '@buf/airalab_sensors-social-proto.bufbuild_es@2.14.0-20260815104319-7f23b240b94d.1(@bufbuild/protobuf@2.14.0)':
+  '@buf/airalab_connectivity-protocol.bufbuild_es@2.14.0-20260828134001-309d77314e7b.1(@bufbuild/protobuf@2.14.0)':
     dependencies:
       '@bufbuild/protobuf': 2.14.0
 
