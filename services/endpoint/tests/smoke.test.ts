@@ -21,7 +21,7 @@ import {
 } from '@polkadot/util-crypto';
 import { buildEnvelopeSigningBytes, REJECTION_CODES } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
-import { SignedEnvelopeSchema } from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { createEndpointApp } from '../src/index.js';
 import { InMemoryRegistryReader } from '@scp/registry-sync';
 

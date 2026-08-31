@@ -23,7 +23,7 @@ import {
 import {
   SignedEnvelopeSchema,
   SignedEnvelopeBatchSchema,
-} from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+} from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 import { CID } from 'multiformats/cid';

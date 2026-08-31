@@ -19,7 +19,7 @@ import {
   ed25519Sign,
 } from '@polkadot/util-crypto';
 import { describe, expect, it } from 'vitest';
-import { SignedEnvelopeSchema } from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { validateSignedEnvelope, buildEnvelopeSigningBytes } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
 
