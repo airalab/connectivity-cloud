@@ -27,7 +27,7 @@ import {
   SignedEnvelopeSchema,
   SignedEnvelopeBatchSchema,
   type SignedEnvelope,
-} from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+} from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { Consumer, Producer } from '@platformatic/kafka';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';

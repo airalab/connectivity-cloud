@@ -23,20 +23,20 @@ import {
   encodeAddress,
 } from '@polkadot/util-crypto';
 import { create, toBinary } from '@bufbuild/protobuf';
-import { SignedEnvelopeSchema } from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import {
   MessageSchema,
   MetaSchema,
-} from '@buf/airalab_sensors-social-proto.bufbuild_es/core/v1/message_pb.js';
+} from '@buf/airalab_connectivity-protocol.bufbuild_es/core/v1/message_pb.js';
 import {
   UrbanSchema,
   UrbanSensorSchema,
-} from '@buf/airalab_sensors-social-proto.bufbuild_es/device/v1/urban_pb.js';
-import { BME280Schema } from '@buf/airalab_sensors-social-proto.bufbuild_es/sensor/v1/sensor_pb.js';
+} from '@buf/airalab_connectivity-protocol.bufbuild_es/device/v1/urban_pb.js';
+import { BME280Schema } from '@buf/airalab_connectivity-protocol.bufbuild_es/sensor/v1/sensor_pb.js';
 import {
   TemperatureSchema,
   HumiditySchema,
-} from '@buf/airalab_sensors-social-proto.bufbuild_es/sensor/v1/measurement_pb.js';
+} from '@buf/airalab_connectivity-protocol.bufbuild_es/sensor/v1/measurement_pb.js';
 import pino from 'pino';
 
 export interface FakeSensorCliOptions {

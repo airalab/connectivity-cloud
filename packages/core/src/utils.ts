@@ -22,7 +22,7 @@ import { fromBinary } from '@bufbuild/protobuf';
 import {
   SignedEnvelopeSchema,
   type SignedEnvelope,
-} from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+} from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 
 export const SENSOR_ID_LENGTH = 32;
 export const SIGNATURE_LENGTH = 64;

@@ -18,7 +18,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { fileURLToPath } from 'node:url';
 import { create } from '@bufbuild/protobuf';
-import { SignedEnvelope } from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+import { SignedEnvelope } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import type { TelemetryRejectedPayload } from '@scp/core';
 import {
   formatSensorId,
