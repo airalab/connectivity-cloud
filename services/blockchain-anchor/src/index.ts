@@ -77,7 +77,7 @@ async function sendSetPayloadExtrinsic(
   if (!api.tx.cps?.setPayload) {
     throw new Error('cps.setPayload extrinsic not found');
   }
-  const extrinsic = api.tx.cps.setPayload(nodeId, api.createType('Vec<u8>', cid));
+  const extrinsic = api.tx.cps.setPayload(nodeId, Array.from(cid));
 
   logInfo('submitting set_payload extrinsic', {
     nodeId,
