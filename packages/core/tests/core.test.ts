@@ -19,7 +19,7 @@ import { TELEMETRY_TOPICS } from '../src/topics.js';
 import { validateSignedEnvelope } from '../src/utils.js';
 import { EnvelopeSchema } from '../src/generated/connectivity/v1/envelope_pb.js';
 import { TelemetryAuthorizedPayloadSchema } from '../src/generated/connectivity/v1/payload_pb.js';
-import { SignedEnvelopeSchema } from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
+import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 
 describe('core', () => {
   it('creates and parses well-formed envelope + authorized payload', () => {
