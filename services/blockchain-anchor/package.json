@@ -13,7 +13,7 @@
     "dev": "tsx watch --env-file=../../.env src/index.ts"
   },
   "dependencies": {
-    "@buf/airalab_sensors-social-proto.bufbuild_es": "2.14.0-20260815104319-7f23b240b94d.1",
+    "@buf/airalab_connectivity-protocol.bufbuild_es": "2.14.0-20260828134001-309d77314e7b.1",
     "@platformatic/kafka": "^2.9.0",
     "@polkadot/api": "^16.5.4",
     "@polkadot/util-crypto": "^14.0.3",
