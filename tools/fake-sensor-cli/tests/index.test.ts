@@ -23,8 +23,8 @@ import {
   createFakeEnvelopePayload,
   parseFakeSensorCliOptions,
 } from '../src/index.js';
-import { SignedEnvelopeSchema } from '@buf/airalab_sensors-social-proto.bufbuild_es/crypto/v1/envelope_pb.js';
-import { MessageSchema } from '@buf/airalab_sensors-social-proto.bufbuild_es/core/v1/message_pb.js';
+import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
+import { MessageSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/core/v1/message_pb.js';
 import { fromBinary } from '@bufbuild/protobuf';
 
 describe('fake sensor CLI', () => {
