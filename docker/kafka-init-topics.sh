@@ -5,6 +5,7 @@ set -e
 TOPICS=(
   "telemetry.authorized.v1"
   "telemetry.rejected.v1"
+  "telemetry.batched.v1"
   "ipfs.published.v1"
   "telemetry.dlq.v1"
 )

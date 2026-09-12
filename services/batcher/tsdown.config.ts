@@ -13,13 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-export const TELEMETRY_TOPICS = Object.freeze({
-  AUTHORIZED: 'telemetry.authorized.v1',
-  REJECTED: 'telemetry.rejected.v1',
-  BATCHED: 'telemetry.batched.v1',
-  IPFS_PUBLISHED: 'ipfs.published.v1',
-  DLQ: 'telemetry.dlq.v1',
-} as const);
+import { defineConfig } from 'tsdown';
 
-export type TelemetryTopic =
-  (typeof TELEMETRY_TOPICS)[keyof typeof TELEMETRY_TOPICS];
+export default defineConfig({
+  entry: ['src/index.ts'],
+  format: ['esm'],
+  clean: true,
+  dts: true,
+});

@@ -15,7 +15,7 @@
  */
 import {
   TELEMETRY_TOPICS,
-  TelemetryAuthorizedPayloadSchema,
+  TelemetryBatchedPayloadSchema,
   TelemetryIpfsPublishedPayloadSchema,
   TelemetryIpfsPublishedPayload_Compression,
   EnvelopeSchema,
@@ -29,32 +29,53 @@ import { describe, expect, it } from 'vitest';
 import { CID } from 'multiformats/cid';
 
 describe('ipfs publisher contract compatibility', () => {
-  it('accepts telemetry.authorized.v1 envelope/payload as input', () => {
-    const payload = create(TelemetryAuthorizedPayloadSchema, {
+  it('accepts telemetry.batched.v1 envelope/payload as input', () => {
+    const signedEnvelope = create(SignedEnvelopeSchema, {
       sensorId: Buffer.alloc(32, 1),
-      signedEnvelope: Buffer.alloc(100, 4),
+      timestamp: BigInt(Date.now()),
+      nonce: Buffer.alloc(16, 2),
+      message: Buffer.from(JSON.stringify({ temp: 20 })),
+      signature: Buffer.alloc(64, 3),
+    });
+    const innerBatch = create(SignedEnvelopeBatchSchema, {
+      batch: [signedEnvelope],
+    });
+
+    const payload = create(TelemetryBatchedPayloadSchema, {
+      batchId: 'batch-contract-1',
+      signedEnvelopeBatch: toBinary(SignedEnvelopeBatchSchema, innerBatch),
+      eventCount: 1,
+      sensorIds: [Buffer.alloc(32, 1)],
     });
 
     const envelope = create(EnvelopeSchema, {
-      eventId: 'evt-contract-1',
-      eventType: TELEMETRY_TOPICS.AUTHORIZED,
-      eventVersion: 'v1',
+      eventId: 'batch-contract-1',
+      eventType: TELEMETRY_TOPICS.BATCHED,
+      eventVersion: '1.0.0',
       occurredAt: '2026-01-01T00:00:00Z',
-      source: 'endpoint',
-      payload: toBinary(TelemetryAuthorizedPayloadSchema, payload),
+      source: 'batcher',
+      payload: toBinary(TelemetryBatchedPayloadSchema, payload),
     });
 
     const envelopeBytes = toBinary(EnvelopeSchema, envelope);
     const parsed = fromBinary(EnvelopeSchema, envelopeBytes);
 
-    expect(parsed.eventType).toBe(TELEMETRY_TOPICS.AUTHORIZED);
-    expect(parsed.eventId).toBe('evt-contract-1');
+    expect(parsed.eventType).toBe(TELEMETRY_TOPICS.BATCHED);
+    expect(parsed.eventId).toBe('batch-contract-1');
 
     const payloadParsed = fromBinary(
-      TelemetryAuthorizedPayloadSchema,
+      TelemetryBatchedPayloadSchema,
       parsed.payload
     );
-    expect(Buffer.from(payloadParsed.sensorId)).toEqual(Buffer.alloc(32, 1));
+    expect(payloadParsed.batchId).toBe('batch-contract-1');
+    expect(payloadParsed.eventCount).toBe(1);
+    const parsedInner = fromBinary(
+      SignedEnvelopeBatchSchema,
+      payloadParsed.signedEnvelopeBatch
+    );
+    expect(Buffer.from(parsedInner.batch[0]?.sensorId ?? [])).toEqual(
+      Buffer.alloc(32, 1)
+    );
   });
 
   it('produces valid SignedEnvelopeBatch for IPFS', () => {
