@@ -121,7 +121,7 @@ async function publishPoisonToDlq(
         source_topic: Buffer.from(TELEMETRY_TOPICS.AUTHORIZED),
         source_service: Buffer.from(config.source),
         source_partition: Buffer.from(String(item.partition)),
-        source_offset: Buffer.from(String(item.offset)),
+        source_offset: Buffer.from(String(item.offset - 1n)),
         reason: Buffer.from(item.parseError ?? 'unknown parse error'),
       },
     })),
