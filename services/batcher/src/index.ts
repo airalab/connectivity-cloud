@@ -30,7 +30,7 @@ import {
 import { Consumer, Producer } from '@platformatic/kafka';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { loadBatcherConfig, type BatcherConfig } from './config.js';
 import { createBatchFlusher } from './batch-flusher.js';
 import { logInfo, logWarn, logDebug, logError } from './logger.js';
@@ -59,14 +59,78 @@ interface BatcherDeps {
 
 /**
  * Batch item holds a signed envelope and its Kafka offset info.
+ *
+ * A "poison" item (one whose envelope could not be parsed) carries no
+ * `signedEnvelope`/`sensorId`/`eventId` but still occupies a slot so its
+ * offset is included in the batch's commit range and it is routed to the
+ * DLQ instead of being silently skipped past.
  */
 interface BatchItem {
-  signedEnvelope: SignedEnvelope;
+  signedEnvelope?: SignedEnvelope;
   offset: bigint;
   partition: number;
-  sensorId: Uint8Array;
+  sensorId?: Uint8Array;
   traceId?: string;
-  eventId: string;
+  eventId?: string;
+  /** Reason the envelope failed to parse; set only for poison items. */
+  parseError?: string;
+  /** Original raw bytes; set only for poison items, for DLQ forwarding. */
+  raw?: Uint8Array;
+}
+
+/** A batch item that parsed successfully and carries a valid envelope. */
+type ValidBatchItem = BatchItem &
+  Required<Pick<BatchItem, 'signedEnvelope' | 'sensorId' | 'eventId'>>;
+
+function isValidItem(item: BatchItem): item is ValidBatchItem {
+  return item.parseError === undefined;
+}
+
+/**
+ * Derive a stable batch ID from the batch's source offsets so retries of the
+ * same detached batch (e.g. after a failed offset commit) reuse the same ID.
+ * This lets downstream consumers (e.g. ipfs-publisher) deduplicate by
+ * `batch_id` even when a produce attempt is retried.
+ */
+function computeBatchId(batch: readonly BatchItem[]): string {
+  const fingerprint = batch
+    .map((b) => `${b.partition}:${b.offset}`)
+    .sort()
+    .join('|');
+  return createHash('sha256').update(fingerprint).digest('hex');
+}
+
+/**
+ * Publish poison (unparseable) records to the DLQ topic so they are handled
+ * explicitly instead of being silently skipped past by a later commit.
+ */
+async function publishPoisonToDlq(
+  poisonItems: readonly BatchItem[],
+  producer: Producer,
+  config: BatcherConfig
+): Promise<void> {
+  if (poisonItems.length === 0) {
+    return;
+  }
+
+  await producer.send({
+    messages: poisonItems.map((item) => ({
+      topic: TELEMETRY_TOPICS.DLQ,
+      value: Buffer.from(item.raw ?? new Uint8Array()),
+      headers: {
+        source_topic: Buffer.from(TELEMETRY_TOPICS.AUTHORIZED),
+        source_service: Buffer.from(config.source),
+        source_partition: Buffer.from(String(item.partition)),
+        source_offset: Buffer.from(String(item.offset)),
+        reason: Buffer.from(item.parseError ?? 'unknown parse error'),
+      },
+    })),
+  });
+
+  logWarn('poison records routed to DLQ', {
+    count: poisonItems.length,
+    dlq_topic: TELEMETRY_TOPICS.DLQ,
+  });
 }
 
 /**
@@ -74,7 +138,7 @@ interface BatchItem {
  * envelope and produce it to Kafka.
  */
 async function produceBatch(
-  batch: readonly BatchItem[],
+  batch: readonly ValidBatchItem[],
   producer: Producer,
   config: BatcherConfig,
   metrics: BatcherMetrics
@@ -92,7 +156,7 @@ async function produceBatch(
     )
   );
 
-  const batchId = randomUUID();
+  const batchId = computeBatchId(batch);
 
   logInfo('producing batch', {
     batch_id: batchId,
@@ -255,11 +319,22 @@ export function createBatcherService(
                 }
               }
 
+              const poisonItems = batchToPublish.filter(
+                (item) => !isValidItem(item)
+              );
+              const validItems = batchToPublish.filter(isValidItem);
+
               try {
-                await produceBatch(batchToPublish, producer, config, metrics);
+                // Route unparseable records to the DLQ before producing so
+                // both are covered by the same offset commit below; if either
+                // step fails the whole batch (poison + valid) is retried
+                // together and no offset is committed.
+                await publishPoisonToDlq(poisonItems, producer, config);
+                await produceBatch(validItems, producer, config, metrics);
 
                 // Commit authorized offsets only after the batch is durably
-                // produced to telemetry.batched.v1.
+                // produced to telemetry.batched.v1 (and poison records, if
+                // any, are durably routed to the DLQ).
                 const offsets = Array.from(offsetsByPartition.entries()).map(
                   ([partition, offset]) => ({
                     topic: TELEMETRY_TOPICS.AUTHORIZED,
@@ -279,10 +354,11 @@ export function createBatcherService(
                 });
               } catch (error) {
                 const failedSensorIds = Array.from(
-                  new Set(batchToPublish.map((b) => formatSensorId(b.sensorId)))
+                  new Set(validItems.map((b) => formatSensorId(b.sensorId)))
                 );
                 logWarn('batch produce failed, will retry on next flush', {
                   batch_size: batchToPublish.length,
+                  poison_count: poisonItems.length,
                   unique_sensors: failedSensorIds.length,
                   sensor_ids: failedSensorIds,
                   error: error instanceof Error ? error.message : String(error),
@@ -300,7 +376,7 @@ export function createBatcherService(
             }
             // The flusher serializes concurrent calls and re-attaches the batch
             // on failure; swallow the error here (already logged).
-await flusher.flush().catch(() => {
+            await flusher.flush().catch(() => {
               if (!shouldStop && flusher.size() > 0) {
                 resetBatchTimer();
               }
@@ -321,6 +397,38 @@ await flusher.flush().catch(() => {
                 await flushBatch();
               }
             }, config.batchTimeoutMs);
+          };
+
+          const maybeFlush = async () => {
+            // Check if batch is full.
+            if (flusher.size() >= config.batchSize) {
+              logDebug('batch size reached', {
+                batch_size: flusher.size(),
+              });
+              await flushBatch();
+            } else {
+              const lag = await getTotalLag(consumer, [
+                TELEMETRY_TOPICS.AUTHORIZED,
+              ]);
+
+              logDebug('consumer lag check', {
+                lag,
+                batch_size: flusher.size(),
+                batch_max: config.batchSize,
+              });
+
+              if (lag < config.batchSize && flusher.size() > 0) {
+                // Not enough messages waiting, start/reset timer.
+                resetBatchTimer();
+              } else if (lag >= config.batchSize) {
+                // Many messages waiting, flush current batch to catch up.
+                logInfo('flushing batch early due to lag', {
+                  batch_size: flusher.size(),
+                  lag,
+                });
+                await flushBatch();
+              }
+            }
           };
 
           try {
@@ -379,40 +487,29 @@ await flusher.flush().catch(() => {
                   batch_max: config.batchSize,
                 });
 
-                // Check if batch is full.
-                if (flusher.size() >= config.batchSize) {
-                  logDebug('batch size reached', {
-                    batch_size: flusher.size(),
-                  });
-                  await flushBatch();
-                } else {
-                  const lag = await getTotalLag(consumer, [
-                    TELEMETRY_TOPICS.AUTHORIZED,
-                  ]);
-
-                  logDebug('consumer lag check', {
-                    lag,
-                    batch_size: flusher.size(),
-                    batch_max: config.batchSize,
-                  });
-
-                  if (lag < config.batchSize && flusher.size() > 0) {
-                    // Not enough messages waiting, start/reset timer.
-                    resetBatchTimer();
-                  } else if (lag >= config.batchSize) {
-                    // Many messages waiting, flush current batch to catch up.
-                    logInfo('flushing batch early due to lag', {
-                      batch_size: flusher.size(),
-                      lag,
-                    });
-                    await flushBatch();
-                  }
-                }
+                await maybeFlush();
               } catch (error) {
-                logWarn('envelope parse error', {
-                  reason:
-                    error instanceof Error ? error.message : String(error),
+                // The record could not be parsed. Rather than silently
+                // dropping it (which would let a later, valid record's
+                // offset commit skip past it undetected), keep its offset in
+                // the same batch as a poison item so it is explicitly routed
+                // to the DLQ and only "skipped" once that is durable.
+                const reason =
+                  error instanceof Error ? error.message : String(error);
+                logWarn('envelope parse error; routing to DLQ', {
+                  partition: message.partition,
+                  offset: message.offset.toString(),
+                  reason,
                 });
+
+                flusher.add({
+                  offset: message.offset + 1n,
+                  partition: message.partition,
+                  parseError: reason,
+                  raw: new Uint8Array(message.value),
+                });
+
+                await maybeFlush();
               }
             }
           } finally {

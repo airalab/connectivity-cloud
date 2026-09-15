@@ -94,6 +94,44 @@ function createBoundedDedup(capacity: number): {
   };
 }
 
+/** Maximum attempts to process a single message before routing it to DLQ. */
+const MAX_PROCESS_ATTEMPTS = 3;
+/** Base delay between processing retries; grows linearly with attempt. */
+const RETRY_BASE_DELAY_MS = 200;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Forward a message that exhausted its processing retries to the DLQ topic,
+ * carrying the original bytes plus failure context in headers.
+ */
+async function publishToDlq(
+  raw: Uint8Array,
+  partition: number,
+  offset: bigint,
+  reason: string,
+  producer: Producer,
+  config: IpfsPublisherConfig
+): Promise<void> {
+  await producer.send({
+    messages: [
+      {
+        topic: TELEMETRY_TOPICS.DLQ,
+        value: Buffer.from(raw),
+        headers: {
+          source_topic: Buffer.from(TELEMETRY_TOPICS.BATCHED),
+          source_service: Buffer.from(config.source),
+          source_partition: Buffer.from(String(partition)),
+          source_offset: Buffer.from(String(offset)),
+          reason: Buffer.from(reason),
+        },
+      },
+    ],
+  });
+}
+
 /**
  * Publish a single batched telemetry payload to IPFS and emit a
  * `ipfs.published.v1` result event.
@@ -249,7 +287,7 @@ export function createIpfsPublisherService(
         runPromise = (async () => {
           const dedup = createBoundedDedup(10000);
 
-          for await (const message of consumerStream) {
+          messageLoop: for await (const message of consumerStream) {
             if (shouldStop) {
               break;
             }
@@ -259,68 +297,138 @@ export function createIpfsPublisherService(
               continue;
             }
 
-            try {
-              const envelope = fromBinary(
-                EnvelopeSchema,
-                new Uint8Array(message.value)
-              );
+            const raw = new Uint8Array(message.value);
 
-              if (envelope.eventType !== TELEMETRY_TOPICS.BATCHED) {
-                logDebug('non-batched envelope ignored', {
-                  eventType: envelope.eventType,
+            // Retry processing of this message in place before moving on to
+            // the next one. Continuing to later messages on failure without
+            // committing would let a later successful commit (a higher
+            // offset) silently skip past this uncommitted one, breaking the
+            // at-least-once contract.
+            for (
+              let attempt = 1;
+              attempt <= MAX_PROCESS_ATTEMPTS;
+              attempt += 1
+            ) {
+              try {
+                const envelope = fromBinary(EnvelopeSchema, raw);
+
+                if (envelope.eventType !== TELEMETRY_TOPICS.BATCHED) {
+                  logDebug('non-batched envelope ignored', {
+                    eventType: envelope.eventType,
+                  });
+                  continue messageLoop;
+                }
+
+                const batched = fromBinary(
+                  TelemetryBatchedPayloadSchema,
+                  envelope.payload
+                ) as TelemetryBatchedPayload;
+
+                metrics.consumed += 1;
+
+                // Skip batches already published in this process; still commit
+                // the offset so the duplicate is not redelivered forever.
+                if (dedup.has(batched.batchId)) {
+                  metrics.duplicatesSkipped += 1;
+                  logDebug('duplicate batch skipped', {
+                    batch_id: batched.batchId,
+                  });
+                } else {
+                  await publishBatched(
+                    batched,
+                    ipfsClient!,
+                    producer,
+                    config,
+                    metrics
+                  );
+                  dedup.add(batched.batchId);
+                }
+
+                // Commit offset only after successful publish (or dedup skip).
+                await consumer.commit({
+                  offsets: [
+                    {
+                      topic: TELEMETRY_TOPICS.BATCHED,
+                      partition: message.partition,
+                      offset: message.offset + 1n,
+                      leaderEpoch: -1,
+                    },
+                  ],
                 });
-                continue;
-              }
 
-              const batched = fromBinary(
-                TelemetryBatchedPayloadSchema,
-                envelope.payload
-              ) as TelemetryBatchedPayload;
-
-              metrics.consumed += 1;
-
-              // Skip batches already published in this process; still commit
-              // the offset so the duplicate is not redelivered forever.
-              if (dedup.has(batched.batchId)) {
-                metrics.duplicatesSkipped += 1;
-                logDebug('duplicate batch skipped', {
+                logDebug('kafka offset committed', {
                   batch_id: batched.batchId,
+                  partition: message.partition,
+                  offset: (message.offset + 1n).toString(),
                 });
-              } else {
-                await publishBatched(
-                  batched,
-                  ipfsClient!,
-                  producer,
-                  config,
-                  metrics
-                );
-                dedup.add(batched.batchId);
-              }
 
-              // Commit offset only after successful publish (or dedup skip).
-              await consumer.commit({
-                offsets: [
-                  {
-                    topic: TELEMETRY_TOPICS.BATCHED,
+                continue messageLoop;
+              } catch (error) {
+                const reason =
+                  error instanceof Error ? error.message : String(error);
+
+                if (attempt < MAX_PROCESS_ATTEMPTS) {
+                  logWarn('batch processing failed, retrying', {
                     partition: message.partition,
-                    offset: message.offset + 1n,
-                    leaderEpoch: -1,
-                  },
-                ],
-              });
+                    offset: message.offset.toString(),
+                    attempt,
+                    max_attempts: MAX_PROCESS_ATTEMPTS,
+                    error: reason,
+                  });
+                  await sleep(RETRY_BASE_DELAY_MS * attempt);
+                  continue;
+                }
 
-              logDebug('kafka offset committed', {
-                batch_id: batched.batchId,
-                partition: message.partition,
-                offset: (message.offset + 1n).toString(),
-              });
-            } catch (error) {
-              // Do not commit on failure; the batch will be redelivered.
-              logWarn('batch processing failed, offset not committed', {
-                partition: message.partition,
-                offset: message.offset.toString(),
-                error: error instanceof Error ? error.message : String(error),
-              });
+                logError(
+                  'batch processing exhausted retries, routing to DLQ',
+                  error,
+                  {
+                    partition: message.partition,
+                    offset: message.offset.toString(),
+                  }
+                );
+
+                try {
+                  await publishToDlq(
+                    raw,
+                    message.partition,
+                    message.offset,
+                    reason,
+                    producer,
+                    config
+                  );
+
+                  // Only commit past the poisoned message now that it is
+                  // durably routed to the DLQ, so nothing is silently lost.
+                  await consumer.commit({
+                    offsets: [
+                      {
+                        topic: TELEMETRY_TOPICS.BATCHED,
+                        partition: message.partition,
+                        offset: message.offset + 1n,
+                        leaderEpoch: -1,
+                      },
+                    ],
+                  });
+
+                  logWarn('poisoned batch routed to DLQ and committed', {
+                    partition: message.partition,
+                    offset: message.offset.toString(),
+                  });
+                } catch (dlqError) {
+                  // Cannot safely commit past this message: stop consuming
+                  // rather than let a later message's commit skip past it.
+                  logError(
+                    'failed to route batch to DLQ; stopping consumption to avoid silent offset skip',
+                    dlqError,
+                    {
+                      partition: message.partition,
+                      offset: message.offset.toString(),
+                    }
+                  );
+                  break messageLoop;
+                }
+              }
             }
           }
         })();
