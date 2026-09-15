@@ -34,6 +34,7 @@ import { logInfo, logWarn, logDebug, logError } from './logger.js';
 interface BlockchainAnchorMetrics {
   consumed: number;
   anchored: number;
+  skippedDuplicate: number;
   failed: number;
 }
 
@@ -43,12 +44,61 @@ export interface BlockchainAnchorService {
   getMetrics(): Readonly<BlockchainAnchorMetrics>;
 }
 
-interface BlockchainAnchorDeps {
+export interface BlockchainAnchorDeps {
   createConsumer?: () => Consumer;
+  createApi?: () => Promise<ApiPromise>;
   createHealthServer?: (
     getMetrics: () => BlockchainAnchorMetrics,
     port: number
   ) => Server;
+}
+
+/**
+ * Minimal shape of the `Option<BoundedVec<u8>>` codec returned by the CPS
+ * pallet's `payload` storage query. Modeled loosely (rather than via
+ * generated types) since this service talks to the chain dynamically.
+ */
+interface OptionBytesCodec {
+  readonly isSome?: boolean;
+  readonly isEmpty?: boolean;
+  unwrap?: () => { toU8a: () => Uint8Array };
+}
+
+/**
+ * Read the CID currently anchored on-chain for a CPS node, if any.
+ *
+ * This is the authoritative idempotency check: rather than relying solely on
+ * a local/Redis marker (which can't observe whether an extrinsic actually
+ * finalized before a crash), we ask the chain what payload is currently set
+ * for the node and compare it against the CID we are about to submit. If
+ * they already match, the anchor operation is a no-op and is skipped.
+ */
+async function getAnchoredCid(
+  api: ApiPromise,
+  nodeId: number
+): Promise<string | null> {
+  if (!api.query.cps?.payload) {
+    return null;
+  }
+
+  try {
+    const raw = (await api.query.cps.payload(
+      nodeId
+    )) as unknown as OptionBytesCodec;
+
+    if (!raw || raw.isEmpty || raw.isSome === false || !raw.unwrap) {
+      return null;
+    }
+
+    const bytes = raw.unwrap().toU8a();
+    return CID.decode(bytes).toString();
+  } catch (error) {
+    logWarn('failed to read on-chain payload for idempotency check', {
+      nodeId,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /**
@@ -200,6 +250,7 @@ export function createBlockchainAnchorService(
   const metrics: BlockchainAnchorMetrics = {
     consumed: 0,
     anchored: 0,
+    skippedDuplicate: 0,
     failed: 0,
   };
 
@@ -224,9 +275,13 @@ export function createBlockchainAnchorService(
 
       try {
         // Connect to blockchain
-        const provider = new WsProvider(config.substrateWsUrl);
-        api = await ApiPromise.create({ provider: provider });
-        await api.isReady;
+        if (deps.createApi) {
+          api = await deps.createApi();
+        } else {
+          const provider = new WsProvider(config.substrateWsUrl);
+          api = await ApiPromise.create({ provider: provider });
+          await api.isReady;
+        }
         logInfo('connected to substrate', {
           substrateWsUrl: config.substrateWsUrl,
         });
@@ -289,23 +344,46 @@ export function createBlockchainAnchorService(
                 });
 
                 try {
-                  await sendSetPayloadExtrinsic(
-                    api!,
-                    keyring!,
-                    config.suri,
-                    config.nodeId,
-                    cidBytes
-                  );
+                  // Idempotency check: ask the chain what is currently
+                  // anchored for this node before submitting a new
+                  // extrinsic. This covers the crash window between
+                  // extrinsic finalization and Kafka offset commit - on
+                  // redelivery the on-chain state already reflects the
+                  // anchor, so we skip re-submission instead of creating a
+                  // duplicate logical anchor operation.
+                  const anchoredCid = await getAnchoredCid(api!, config.nodeId);
 
-                  metrics.anchored += 1;
+                  if (anchoredCid === cidString) {
+                    metrics.skippedDuplicate += 1;
 
-                  logInfo('CID anchored successfully', {
-                    cid: cidString,
-                    event_count: payload.eventCount,
-                    node_id: config.nodeId,
-                  });
+                    logInfo(
+                      'CID already anchored on-chain; skipping duplicate submission',
+                      {
+                        cid: cidString,
+                        event_id: envelope.eventId,
+                        node_id: config.nodeId,
+                      }
+                    );
+                  } else {
+                    await sendSetPayloadExtrinsic(
+                      api!,
+                      keyring!,
+                      config.suri,
+                      config.nodeId,
+                      cidBytes
+                    );
 
-                  // Commit offset only after successful anchoring
+                    metrics.anchored += 1;
+
+                    logInfo('CID anchored successfully', {
+                      cid: cidString,
+                      event_count: payload.eventCount,
+                      node_id: config.nodeId,
+                    });
+                  }
+
+                  // Commit offset only after successful anchoring (or a
+                  // confirmed no-op due to the idempotency check above)
                   await consumer.commit({
                     offsets: [
                       {
