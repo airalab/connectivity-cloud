@@ -38,7 +38,10 @@ function createClock(start = Date.parse('2026-01-01T00:00:00Z')) {
   };
 }
 
-function authorizedEnvelope(sensorId: string) {
+function authorizedEnvelope(
+  sensorId: string,
+  occurredAtMs: number = Date.parse('2026-01-01T00:00:00Z')
+) {
   const sensorBytes = Buffer.from(sensorId.padEnd(32, '_').slice(0, 32));
   const signedEnvelope = Buffer.alloc(100, 0); // Fake signed envelope bytes
 
@@ -48,10 +51,10 @@ function authorizedEnvelope(sensorId: string) {
   });
 
   const envelope = create(EnvelopeSchema, {
-    eventId: `evt-${sensorId}`,
+    eventId: `evt-${sensorId}-${occurredAtMs}`,
     eventType: TELEMETRY_TOPICS.AUTHORIZED,
     eventVersion: 'v1',
-    occurredAt: '2026-01-01T00:00:00Z',
+    occurredAt: new Date(occurredAtMs).toISOString(),
     source: 'endpoint',
     payload: toBinary(TelemetryAuthorizedPayloadSchema, payload),
   });
@@ -104,6 +107,64 @@ class FakeRedis {
     this.hashes.delete(key);
     return existed;
   }
+
+  /**
+   * Test double for the heartbeat compare-and-set Lua script used in
+   * production. Mirrors its semantics: `lastSeen` only advances when the
+   * incoming event timestamp is strictly newer than what is stored.
+   */
+  async eval(
+    _script: string,
+    numkeys: number,
+    ...rest: Array<string | number>
+  ): Promise<[number, number, number, number, number]> {
+    const keys = rest.slice(0, numkeys) as string[];
+    const args = rest.slice(numkeys);
+    const [key, sensorsKey] = keys;
+    const [sensorId, eventTimeRaw, onlineWindowMsRaw] = args;
+    const eventTime = Number(eventTimeRaw);
+    const onlineWindowMs = Number(onlineWindowMsRaw);
+
+    if (key === undefined || sensorsKey === undefined) {
+      throw new Error('missing keys for eval');
+    }
+    if (typeof sensorId !== 'string') {
+      throw new Error('missing sensorId arg for eval');
+    }
+
+    await this.sadd(sensorsKey, sensorId);
+
+    const existing = this.hashes.get(key) ?? {};
+    const lastSeen = Number.parseInt(existing.lastSeen ?? '', 10);
+    const firstSeen = Number.parseInt(existing.firstSeen ?? '', 10);
+    const onlineSince = Number.parseInt(existing.onlineSince ?? '', 10);
+    const hasLastSeen = Number.isFinite(lastSeen);
+    const hasFirstSeen = Number.isFinite(firstSeen);
+    const hasOnlineSince = Number.isFinite(onlineSince);
+    const isNew = hasFirstSeen ? 0 : 1;
+
+    if (!hasLastSeen || eventTime > lastSeen) {
+      const newFirstSeen = hasFirstSeen ? firstSeen : eventTime;
+      let newOnlineSince = hasOnlineSince ? onlineSince : eventTime;
+      if (hasLastSeen && eventTime - lastSeen > onlineWindowMs) {
+        newOnlineSince = eventTime;
+      }
+      this.hashes.set(key, {
+        firstSeen: String(newFirstSeen),
+        lastSeen: String(eventTime),
+        onlineSince: String(newOnlineSince),
+      });
+      return [1, isNew, newFirstSeen, eventTime, newOnlineSince];
+    }
+
+    return [
+      0,
+      isNew,
+      hasFirstSeen ? firstSeen : eventTime,
+      lastSeen,
+      hasOnlineSince ? onlineSince : eventTime,
+    ];
+  }
 }
 
 describe('heartbeat tracker state', () => {
@@ -119,7 +180,7 @@ describe('heartbeat tracker state', () => {
     const consumed = { value: 0 };
 
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-1'),
+      authorizedEnvelope('sensor-1', clock.now()),
       tracker,
       consumed
     );
@@ -142,7 +203,7 @@ describe('heartbeat tracker state', () => {
     const consumed = { value: 0 };
 
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-1'),
+      authorizedEnvelope('sensor-1', clock.now()),
       tracker,
       consumed
     );
@@ -166,19 +227,19 @@ describe('heartbeat tracker state', () => {
     const consumed = { value: 0 };
 
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-a'),
+      authorizedEnvelope('sensor-a', clock.now()),
       tracker,
       consumed
     );
     clock.set(base + 10000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-b'),
+      authorizedEnvelope('sensor-b', clock.now()),
       tracker,
       consumed
     );
     clock.set(base + 39000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-c'),
+      authorizedEnvelope('sensor-c', clock.now()),
       tracker,
       consumed
     );
@@ -208,13 +269,13 @@ describe('heartbeat tracker state', () => {
     const consumed = { value: 0 };
 
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-1'),
+      authorizedEnvelope('sensor-1', clock.now()),
       tracker,
       consumed
     );
     clock.advance(10000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-1'),
+      authorizedEnvelope('sensor-1', clock.now()),
       tracker,
       consumed
     );
@@ -225,7 +286,7 @@ describe('heartbeat tracker state', () => {
 
     clock.advance(35000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-1'),
+      authorizedEnvelope('sensor-1', clock.now()),
       tracker,
       consumed
     );
@@ -247,13 +308,13 @@ describe('heartbeat tracker state', () => {
     const consumed = { value: 0 };
 
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-a'),
+      authorizedEnvelope('sensor-a', clock.now()),
       tracker,
       consumed
     );
     clock.set(base + 10000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-b'),
+      authorizedEnvelope('sensor-b', clock.now()),
       tracker,
       consumed
     );
@@ -308,6 +369,72 @@ describe('heartbeat tracker state', () => {
     expect(metrics.sensors_online).toBe(0);
   });
 
+  it('does not move lastSeen backwards when replaying an older event', async () => {
+    const base = Date.parse('2026-01-01T00:00:00Z');
+    const clock = createClock(base);
+    const tracker = createHeartbeatTrackerState(
+      new FakeRedis(),
+      'heartbeat-tracker:test',
+      30000,
+      300000,
+      clock.now
+    );
+    const consumed = { value: 0 };
+
+    // Newest event arrives first.
+    await handleTelemetryMessage(
+      authorizedEnvelope('sensor-1', base + 20000),
+      tracker,
+      consumed
+    );
+    // A delayed/replayed older event arrives afterwards.
+    await handleTelemetryMessage(
+      authorizedEnvelope('sensor-1', base + 5000),
+      tracker,
+      consumed
+    );
+
+    clock.set(base + 20000);
+    const metrics = await tracker.createMetrics(consumed.value);
+    const detail = metrics.sensors_uptime.find(
+      (entry) => entry.sensor_id === encodeSensorId('sensor-1')
+    );
+    expect(detail?.last_seen).toBe(new Date(base + 20000).toISOString());
+    expect(consumed.value).toBe(2);
+  });
+
+  it('produces monotonically increasing heartbeat state for out-of-order events', async () => {
+    const base = Date.parse('2026-01-01T00:00:00Z');
+    const clock = createClock(base);
+    const tracker = createHeartbeatTrackerState(
+      new FakeRedis(),
+      'heartbeat-tracker:test',
+      30000,
+      300000,
+      clock.now
+    );
+    const consumed = { value: 0 };
+
+    const timestamps = [base, base + 5000, base + 2000, base + 15000];
+    for (const ts of timestamps) {
+      await handleTelemetryMessage(
+        authorizedEnvelope('sensor-1', ts),
+        tracker,
+        consumed
+      );
+    }
+
+    clock.set(base + 15000);
+    const metrics = await tracker.createMetrics(consumed.value);
+    const detail = metrics.sensors_uptime.find(
+      (entry) => entry.sensor_id === encodeSensorId('sensor-1')
+    );
+    // lastSeen must reflect the highest event timestamp seen so far,
+    // regardless of the arrival order of the underlying Kafka records.
+    expect(detail?.last_seen).toBe(new Date(base + 15000).toISOString());
+    expect(detail?.first_seen).toBe(new Date(base).toISOString());
+  });
+
   it('prunes sensors not seen within retention window', async () => {
     const base = Date.parse('2026-01-01T00:00:00Z');
     const clock = createClock(base);
@@ -324,13 +451,13 @@ describe('heartbeat tracker state', () => {
 
     // Add two sensors
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-old'),
+      authorizedEnvelope('sensor-old', clock.now()),
       tracker,
       consumed
     );
     clock.set(base + 10000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-recent'),
+      authorizedEnvelope('sensor-recent', clock.now()),
       tracker,
       consumed
     );
@@ -343,7 +470,7 @@ describe('heartbeat tracker state', () => {
     // Move time beyond retention window for sensor-old, but keep sensor-recent within retention
     clock.set(base + retentionWindowMs + 1000);
     await handleTelemetryMessage(
-      authorizedEnvelope('sensor-recent'),
+      authorizedEnvelope('sensor-recent', clock.now()),
       tracker,
       consumed
     );

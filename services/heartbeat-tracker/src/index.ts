@@ -56,7 +56,10 @@ export interface HeartbeatTrackerService {
 }
 
 export interface HeartbeatTrackerState {
-  recordAuthorizedSensor(sensorId: string): Promise<void>;
+  recordAuthorizedSensor(
+    sensorId: string,
+    eventTimestampMs: number
+  ): Promise<void>;
   createMetrics(consumed: number): Promise<HeartbeatTrackerMetrics>;
 }
 
@@ -77,9 +80,66 @@ interface RedisLike {
   smembers(key: string): Promise<string[]>;
   srem(key: string, member: string): Promise<number>;
   del(key: string): Promise<number>;
+  eval(
+    script: string,
+    numkeys: number,
+    ...args: Array<string | number>
+  ): Promise<unknown>;
   quit?(): Promise<'OK'>;
   disconnect?(): void;
 }
+
+/**
+ * Atomically applies a heartbeat update for a sensor.
+ *
+ * The stored `lastSeen` is only advanced when the incoming event timestamp is
+ * strictly newer than what is currently stored, making replayed/out-of-order
+ * Kafka records unable to move heartbeat state backwards or re-advance it.
+ * `onlineSince` resets to the event time whenever the gap since the previous
+ * (stored) `lastSeen` exceeds `onlineWindowMs`.
+ *
+ * KEYS[1] = sensor hash key
+ * KEYS[2] = sensors set key
+ * ARGV[1] = sensor id
+ * ARGV[2] = event timestamp (ms)
+ * ARGV[3] = online window (ms)
+ *
+ * Returns [updated, isNew, firstSeen, lastSeen, onlineSince].
+ */
+const HEARTBEAT_CAS_SCRIPT = `
+local key = KEYS[1]
+local sensorsKey = KEYS[2]
+local sensorId = ARGV[1]
+local eventTime = tonumber(ARGV[2])
+local onlineWindowMs = tonumber(ARGV[3])
+
+redis.call('SADD', sensorsKey, sensorId)
+
+local lastSeenRaw = redis.call('HGET', key, 'lastSeen')
+local firstSeenRaw = redis.call('HGET', key, 'firstSeen')
+local onlineSinceRaw = redis.call('HGET', key, 'onlineSince')
+
+local lastSeen = lastSeenRaw and tonumber(lastSeenRaw) or nil
+local firstSeen = firstSeenRaw and tonumber(firstSeenRaw) or nil
+local onlineSince = onlineSinceRaw and tonumber(onlineSinceRaw) or nil
+
+local isNew = 0
+if firstSeen == nil then
+  isNew = 1
+end
+
+if lastSeen == nil or eventTime > lastSeen then
+  local newFirstSeen = firstSeen or eventTime
+  local newOnlineSince = onlineSince or eventTime
+  if lastSeen ~= nil and (eventTime - lastSeen) > onlineWindowMs then
+    newOnlineSince = eventTime
+  end
+  redis.call('HSET', key, 'firstSeen', newFirstSeen, 'lastSeen', eventTime, 'onlineSince', newOnlineSince)
+  return {1, isNew, newFirstSeen, eventTime, newOnlineSince}
+end
+
+return {0, isNew, firstSeen or eventTime, lastSeen, onlineSince or eventTime}
+`;
 
 const logger = pino({
   name: 'heartbeat-tracker',
@@ -132,48 +192,39 @@ export function createHeartbeatTrackerState(
   const keyspace = createHeartbeatTrackerKeyspace(redisKeyPrefix);
 
   return {
-    async recordAuthorizedSensor(sensorId: string): Promise<void> {
-      const observedAt = now();
+    async recordAuthorizedSensor(
+      sensorId: string,
+      eventTimestampMs: number
+    ): Promise<void> {
       const key = keyspace.sensor(sensorId);
-      const existing = await redis.hgetall(key);
-      const existingLastSeen = Number.parseInt(existing.lastSeen ?? '', 10);
-      const existingOnlineSince = Number.parseInt(
-        existing.onlineSince ?? '',
-        10
-      );
-      const existingFirstSeen = Number.parseInt(existing.firstSeen ?? '', 10);
-      const hasExisting = Number.isFinite(existingLastSeen);
+      const result = (await redis.eval(
+        HEARTBEAT_CAS_SCRIPT,
+        2,
+        key,
+        keyspace.sensors,
+        sensorId,
+        eventTimestampMs,
+        onlineWindowMs
+      )) as [number, number, number, number, number];
+      const [updatedFlag, isNewFlag, , lastSeen] = result;
+      const updated = updatedFlag === 1;
+      const isNewSensor = isNewFlag === 1;
 
-      let onlineSince = Number.isFinite(existingOnlineSince)
-        ? existingOnlineSince
-        : observedAt;
-      const isNewSensor = !hasExisting;
-      const gapMs = hasExisting ? observedAt - existingLastSeen : 0;
-
-      if (hasExisting && observedAt - existingLastSeen > onlineWindowMs) {
-        onlineSince = observedAt;
-        logDebug('sensor uptime streak reset after offline gap', {
+      if (!updated) {
+        logDebug('stale or replayed heartbeat ignored', {
           sensor_id: sensorId,
-          gap_ms: gapMs,
-          online_window_ms: onlineWindowMs,
+          event_timestamp_ms: eventTimestampMs,
+          stored_last_seen_ms: lastSeen,
         });
+        return;
       }
-
-      await redis.hset(key, {
-        firstSeen: String(
-          Number.isFinite(existingFirstSeen) ? existingFirstSeen : observedAt
-        ),
-        lastSeen: String(observedAt),
-        onlineSince: String(onlineSince),
-      });
-      await redis.sadd(keyspace.sensors, sensorId);
 
       if (isNewSensor) {
         logInfo('new sensor tracked', { sensor_id: sensorId });
       } else {
         logDebug('sensor heartbeat recorded', {
           sensor_id: sensorId,
-          gap_ms: gapMs,
+          event_timestamp_ms: eventTimestampMs,
         });
       }
     },
@@ -316,16 +367,27 @@ export function handleTelemetryMessage(
     ) as TelemetryAuthorizedPayload;
 
     const sensorIdHex = Buffer.from(payload.sensorId).toString('hex');
+    const eventTimestampMs = Date.parse(envelope.occurredAt);
 
     logDebug('authorized envelope received', {
       eventId: envelope.eventId,
       eventType: envelope.eventType,
       trace_id: envelope.traceId,
       sensor_id: formatSensorId(payload.sensorId),
+      occurred_at: envelope.occurredAt,
     });
 
+    if (!Number.isFinite(eventTimestampMs)) {
+      logWarn('envelope has invalid occurred_at timestamp; skipping', {
+        eventId: envelope.eventId,
+        occurred_at: envelope.occurredAt,
+        sensor_id: formatSensorId(payload.sensorId),
+      });
+      return Promise.resolve();
+    }
+
     consumed.value += 1;
-    return tracker.recordAuthorizedSensor(sensorIdHex);
+    return tracker.recordAuthorizedSensor(sensorIdHex, eventTimestampMs);
   } catch (error) {
     logWarn('envelope parse error', {
       reason: error instanceof Error ? error.message : String(error),

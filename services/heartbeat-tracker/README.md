@@ -5,9 +5,17 @@ Observability consumer for trusted `telemetry.authorized.v1` events. It tracks s
 ## Online and uptime definitions
 
 - **Online**: `now - lastSeen <= HEARTBEAT_TRACKER_ONLINE_WINDOW_MS` (default: `30000` ms / 30s).
-- **firstSeen**: first time a sensor is observed.
-- **lastSeen**: most recent authorized message time.
-- **onlineSince**: start of the current continuous online streak. If the gap between two messages is greater than the window, streak uptime resets at the new message.
+- **firstSeen**: first time a sensor is observed, based on the telemetry event's `occurred_at` timestamp.
+- **lastSeen**: the highest `occurred_at` event timestamp seen for the sensor so far (not Kafka processing time).
+- **onlineSince**: start of the current continuous online streak. If the gap between two event timestamps is greater than the window, streak uptime resets at the new event.
+
+## Event-time based, monotonic heartbeat state
+
+Heartbeat timing is derived from the `Envelope.occurred_at` timestamp of the telemetry event, not from when the Kafka record is processed. Redis is updated with a compare-and-set Lua script so that `lastSeen`/`onlineSince`/`firstSeen` only advance when the incoming event timestamp is strictly newer than what is stored:
+
+- Replaying an older Kafka record cannot move `lastSeen` backwards (or re-advance it).
+- The read-modify-write is atomic, so concurrent consumer instances (e.g. during a rebalance) cannot race and corrupt state.
+- Horizontal scaling is safe as long as records for a given sensor are partitioned consistently by sensor ID.
 
 ## Environment
 
