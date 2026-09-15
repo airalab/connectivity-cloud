@@ -25,8 +25,6 @@ describe('loadIpfsPublisherConfig', () => {
     expect(config.source).toBe('ipfs-publisher');
     expect(config.healthPort).toBe(3040);
     expect(config.ipfsApiUrl).toBe('http://localhost:5001');
-    expect(config.batchSize).toBe(10);
-    expect(config.batchTimeoutMs).toBe(30000);
     expect(config.enableCompression).toBe(true);
   });
 
@@ -92,38 +90,6 @@ describe('loadIpfsPublisherConfig', () => {
     });
 
     expect(config.ipfsApiUrl).toBe('http://ipfs.example.com:5001');
-  });
-
-  it('parses custom batch size', () => {
-    const config = loadIpfsPublisherConfig({
-      IPFS_PUBLISHER_BATCH_SIZE: '50',
-    });
-
-    expect(config.batchSize).toBe(50);
-  });
-
-  it('falls back to default on invalid batch size', () => {
-    const config = loadIpfsPublisherConfig({
-      IPFS_PUBLISHER_BATCH_SIZE: '0',
-    });
-
-    expect(config.batchSize).toBe(10);
-  });
-
-  it('parses custom batch timeout', () => {
-    const config = loadIpfsPublisherConfig({
-      IPFS_PUBLISHER_BATCH_TIMEOUT_MS: '60000',
-    });
-
-    expect(config.batchTimeoutMs).toBe(60000);
-  });
-
-  it('falls back to default on invalid batch timeout', () => {
-    const config = loadIpfsPublisherConfig({
-      IPFS_PUBLISHER_BATCH_TIMEOUT_MS: '-100',
-    });
-
-    expect(config.batchTimeoutMs).toBe(30000);
   });
 
   it('disables compression when explicitly set to false', () => {

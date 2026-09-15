@@ -1,7 +1,9 @@
 # WP-04 — `ipfs-publisher`
 
 ## Summary
-WP-04 implements deterministic batching and IPFS publication for authorized telemetry events. It consumes `telemetry.authorized.v1`, builds stable batch artifacts, publishes/pins to IPFS, and emits CID result events back to Kafka. The module is responsible for reliable side-effect sequencing with idempotent batch handling.
+WP-04 implements deterministic batching and IPFS publication for authorized telemetry events.
+
+> **Update (batcher/publisher split):** batching and IPFS publication are now separate services. The `@scp/batcher` service consumes `telemetry.authorized.v1`, builds deterministic batches, and emits `telemetry.batched.v1`. The `@scp/ipfs-publisher` service consumes `telemetry.batched.v1`, publishes/pins the batch artifact to IPFS, and emits `ipfs.published.v1` (`cid`, `event_count`). The sections below describe the combined responsibility; the batching tasks now belong to the batcher and the publication tasks to the ipfs-publisher.
 
 ## Depends on
 - WP-00

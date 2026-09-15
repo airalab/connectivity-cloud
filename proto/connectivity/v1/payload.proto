@@ -23,6 +23,22 @@ message TelemetryRejectedPayload {
   string reason_message = 3;
 }
 
+// TelemetryBatchedPayload carries a batch of authorized telemetry ready for
+// publication. It is emitted by the batcher and consumed by the ipfs-publisher.
+message TelemetryBatchedPayload {
+  // Unique batch identifier
+  string batch_id = 1;
+
+  // Serialized crypto.v1.SignedEnvelopeBatch (uncompressed)
+  bytes signed_envelope_batch = 2;
+
+  // Number of events in the batch
+  uint32 event_count = 3;
+
+  // Sensor IDs present in the batch (observability)
+  repeated bytes sensor_ids = 4;
+}
+
 // TelemetryIpfsPublishedPayload is emitted when events are published to IPFS.
 message TelemetryIpfsPublishedPayload {
   enum Compression {

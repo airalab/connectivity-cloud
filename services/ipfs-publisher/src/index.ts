@@ -16,18 +16,13 @@
 import {
   TELEMETRY_TOPICS,
   EnvelopeSchema,
-  TelemetryAuthorizedPayloadSchema,
+  TelemetryBatchedPayloadSchema,
   TelemetryIpfsPublishedPayloadSchema,
   TelemetryIpfsPublishedPayload_Compression as Compression,
-  type TelemetryAuthorizedPayload,
+  type TelemetryBatchedPayload,
   formatSensorId,
 } from '@scp/core';
 import { fromBinary, toBinary, create } from '@bufbuild/protobuf';
-import {
-  SignedEnvelopeSchema,
-  SignedEnvelopeBatchSchema,
-  type SignedEnvelope,
-} from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { Consumer, Producer } from '@platformatic/kafka';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +40,7 @@ interface IpfsPublisherMetrics {
   consumed: number;
   batchesPublished: number;
   eventsPublished: number;
+  duplicatesSkipped: number;
   publishFailure: number;
 }
 
@@ -71,73 +67,113 @@ interface IpfsPublisherDeps {
 }
 
 /**
- * Batch holds signed envelopes and their Kafka offset info
+ * Bounded set that remembers recently seen batch ids for in-process
+ * deduplication, so a redelivered batch is not published to IPFS twice.
  */
-interface BatchItem {
-  signedEnvelope: SignedEnvelope;
-  offset: bigint;
-  partition: number;
-  sensorId: Uint8Array;
-  traceId?: string;
-  eventId: string;
+function createBoundedDedup(capacity: number): {
+  has: (id: string) => boolean;
+  add: (id: string) => void;
+} {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  return {
+    has: (id) => seen.has(id),
+    add: (id) => {
+      if (seen.has(id)) {
+        return;
+      }
+      seen.add(id);
+      order.push(id);
+      if (order.length > capacity) {
+        const evicted = order.shift();
+        if (evicted !== undefined) {
+          seen.delete(evicted);
+        }
+      }
+    },
+  };
+}
+
+/** Maximum attempts to process a single message before routing it to DLQ. */
+const MAX_PROCESS_ATTEMPTS = 3;
+/** Base delay between processing retries; grows linearly with attempt. */
+const RETRY_BASE_DELAY_MS = 200;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Publish batch to IPFS and emit result event
+ * Forward a message that exhausted its processing retries to the DLQ topic,
+ * carrying the original bytes plus failure context in headers.
  */
-async function publishBatch(
-  batch: BatchItem[],
+async function publishToDlq(
+  raw: Uint8Array,
+  partition: number,
+  offset: bigint,
+  reason: string,
+  producer: Producer,
+  config: IpfsPublisherConfig
+): Promise<void> {
+  await producer.send({
+    messages: [
+      {
+        topic: TELEMETRY_TOPICS.DLQ,
+        value: Buffer.from(raw),
+        headers: {
+          source_topic: Buffer.from(TELEMETRY_TOPICS.BATCHED),
+          source_service: Buffer.from(config.source),
+          source_partition: Buffer.from(String(partition)),
+          source_offset: Buffer.from(String(offset)),
+          reason: Buffer.from(reason),
+        },
+      },
+    ],
+  });
+}
+
+/**
+ * Publish a single batched telemetry payload to IPFS and emit a
+ * `ipfs.published.v1` result event.
+ */
+async function publishBatched(
+  batched: TelemetryBatchedPayload,
   ipfsClient: IpfsClient,
   producer: Producer,
   config: IpfsPublisherConfig,
   metrics: IpfsPublisherMetrics
 ): Promise<void> {
-  if (batch.length === 0) {
-    return;
-  }
-
-  // Collect unique sensor IDs and trace IDs for logging
   const uniqueSensorIds = Array.from(
-    new Set(batch.map((b) => formatSensorId(b.sensorId)))
-  );
-  const traceIds = Array.from(
-    new Set(
-      batch.map((b) => b.traceId).filter((id): id is string => id !== undefined)
-    )
+    new Set(batched.sensorIds.map((id) => formatSensorId(id)))
   );
 
   logInfo('publishing batch to IPFS', {
-    batch_size: batch.length,
+    batch_id: batched.batchId,
+    event_count: batched.eventCount,
     unique_sensors: uniqueSensorIds.length,
     sensor_ids: uniqueSensorIds,
-    trace_ids: traceIds.length > 0 ? traceIds : undefined,
   });
 
   try {
-    // Serialize batch
-    const batchData = create(SignedEnvelopeBatchSchema, {
-      batch: batch.map((b) => b.signedEnvelope),
-    });
-
-    // Publish to IPFS
+    // Publish the pre-serialized SignedEnvelopeBatch, compressing at publish
+    // time so the wire format on the batched topic stays uncompressed.
     const cid = await ipfsClient.add(
-      toBinary(SignedEnvelopeBatchSchema, batchData),
+      batched.signedEnvelopeBatch,
       config.enableCompression
     );
 
     logInfo('batch published to IPFS', {
+      batch_id: batched.batchId,
       cid,
-      event_count: batch.length,
+      event_count: batched.eventCount,
       unique_sensors: uniqueSensorIds.length,
       sensor_ids: uniqueSensorIds,
-      trace_ids: traceIds.length > 0 ? traceIds : undefined,
       compression: config.enableCompression,
     });
 
-    // Create result envelope
     const payload = create(TelemetryIpfsPublishedPayloadSchema, {
       cid: Buffer.from(CID.parse(cid).bytes),
-      eventCount: batch.length,
+      eventCount: batched.eventCount,
       compression: config.enableCompression ? Compression.XZ : Compression.NONE,
     });
 
@@ -150,7 +186,6 @@ async function publishBatch(
       payload: toBinary(TelemetryIpfsPublishedPayloadSchema, payload),
     });
 
-    // Publish result to Kafka
     await producer.send({
       messages: [
         {
@@ -161,49 +196,23 @@ async function publishBatch(
     });
 
     metrics.batchesPublished += 1;
-    metrics.eventsPublished += batch.length;
+    metrics.eventsPublished += batched.eventCount;
 
     logInfo('batch result published to Kafka', {
+      batch_id: batched.batchId,
       cid,
-      event_count: batch.length,
-      unique_sensors: uniqueSensorIds.length,
-      sensor_ids: uniqueSensorIds,
-      trace_ids: traceIds.length > 0 ? traceIds : undefined,
+      event_count: batched.eventCount,
       result_topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
     });
   } catch (error) {
     metrics.publishFailure += 1;
     logError('batch publish failed', error, {
-      batch_size: batch.length,
+      batch_id: batched.batchId,
+      event_count: batched.eventCount,
       unique_sensors: uniqueSensorIds.length,
       sensor_ids: uniqueSensorIds,
-      trace_ids: traceIds.length > 0 ? traceIds : undefined,
     });
     throw error;
-  }
-}
-
-/**
- * Get total lag (pending messages) across all partitions for given topics
- */
-async function getTotalLag(
-  consumer: Consumer,
-  topics: string[]
-): Promise<number> {
-  try {
-    const lagMap = await consumer.getLag({ topics });
-    let total = 0;
-    for (const partitionLags of lagMap.values()) {
-      for (const lag of partitionLags) {
-        total += Number(lag);
-      }
-    }
-    return total;
-  } catch (error) {
-    logWarn('failed to get consumer lag', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return 0;
   }
 }
 
@@ -241,6 +250,7 @@ export function createIpfsPublisherService(
     consumed: 0,
     batchesPublished: 0,
     eventsPublished: 0,
+    duplicatesSkipped: 0,
     publishFailure: 0,
   };
 
@@ -259,8 +269,7 @@ export function createIpfsPublisherService(
         consumerGroupId: config.consumerGroupId,
         kafkaBrokers: config.kafkaBrokers,
         ipfsApiUrl: config.ipfsApiUrl,
-        batchSize: config.batchSize,
-        batchTimeoutMs: config.batchTimeoutMs,
+        enableCompression: config.enableCompression,
         healthPort: config.healthPort,
       });
 
@@ -269,214 +278,159 @@ export function createIpfsPublisherService(
         await ipfsClient.start();
 
         const consumerStream = await consumer.consume({
-          topics: [TELEMETRY_TOPICS.AUTHORIZED],
+          topics: [TELEMETRY_TOPICS.BATCHED],
           autocommit: false,
         });
 
         healthServer = createHealthServer(getMetrics, config.healthPort);
 
         runPromise = (async () => {
-          let currentBatch: BatchItem[] = [];
-          let batchTimer: NodeJS.Timeout | null = null;
+          const dedup = createBoundedDedup(10000);
 
-          const resetBatchTimer = () => {
-            if (batchTimer) {
-              clearTimeout(batchTimer);
-              batchTimer = null;
+          messageLoop: for await (const message of consumerStream) {
+            if (shouldStop) {
+              break;
             }
 
-            batchTimer = setTimeout(async () => {
-              if (currentBatch.length > 0) {
-                logDebug('batch timeout reached', {
-                  batch_size: currentBatch.length,
-                });
-                await flushBatch();
-              }
-            }, config.batchTimeoutMs);
-          };
-
-          const flushBatch = async () => {
-            if (currentBatch.length === 0) {
-              return;
+            if (!message.value) {
+              logWarn('received null message value; skipping');
+              continue;
             }
 
-            const batchToPublish = [...currentBatch];
+            const raw = new Uint8Array(message.value);
 
-            // Get last offset for each partition in batch
-            const offsetsByPartition = new Map<number, bigint>();
-            for (const item of batchToPublish) {
-              const current = offsetsByPartition.get(item.partition);
-              if (!current || item.offset > current) {
-                offsetsByPartition.set(item.partition, item.offset);
-              }
-            }
-
-            try {
-              await publishBatch(
-                batchToPublish,
-                ipfsClient!,
-                producer,
-                config,
-                metrics
-              );
-
-              // Commit offsets only after successful publish
-              const offsets = Array.from(offsetsByPartition.entries()).map(
-                ([partition, offset]) => ({
-                  topic: TELEMETRY_TOPICS.AUTHORIZED,
-                  partition,
-                  offset,
-                  leaderEpoch: -1,
-                })
-              );
-
-              await consumer.commit({ offsets });
-
-              logDebug('kafka offsets committed', {
-                offsets: offsets.map((o) => ({
-                  partition: o.partition,
-                  offset: o.offset.toString(),
-                })),
-              });
-
-              // Clear batch after successful publish and commit
-              currentBatch = [];
-
-              if (batchTimer) {
-                clearTimeout(batchTimer);
-                batchTimer = null;
-              }
-            } catch (error) {
-              // On failure, keep messages in batch for retry
-              const failedSensorIds = Array.from(
-                new Set(batchToPublish.map((b) => formatSensorId(b.sensorId)))
-              );
-              const failedTraceIds = Array.from(
-                new Set(
-                  batchToPublish
-                    .map((b) => b.traceId)
-                    .filter((id): id is string => id !== undefined)
-                )
-              );
-              logWarn('batch flush failed, will retry on next message', {
-                batch_size: batchToPublish.length,
-                unique_sensors: failedSensorIds.length,
-                sensor_ids: failedSensorIds,
-                trace_ids:
-                  failedTraceIds.length > 0 ? failedTraceIds : undefined,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
-          };
-
-          try {
-            for await (const message of consumerStream) {
-              if (shouldStop) {
-                break;
-              }
-
-              if (!message.value) {
-                logWarn('received null message value; skipping');
-                continue;
-              }
-
+            // Retry processing of this message in place before moving on to
+            // the next one. Continuing to later messages on failure without
+            // committing would let a later successful commit (a higher
+            // offset) silently skip past this uncommitted one, breaking the
+            // at-least-once contract.
+            for (
+              let attempt = 1;
+              attempt <= MAX_PROCESS_ATTEMPTS;
+              attempt += 1
+            ) {
               try {
-                const envelope = fromBinary(
-                  EnvelopeSchema,
-                  new Uint8Array(message.value)
-                );
+                const envelope = fromBinary(EnvelopeSchema, raw);
 
-                if (envelope.eventType !== TELEMETRY_TOPICS.AUTHORIZED) {
-                  logDebug('non-authorized envelope ignored', {
+                if (envelope.eventType !== TELEMETRY_TOPICS.BATCHED) {
+                  logDebug('non-batched envelope ignored', {
                     eventType: envelope.eventType,
                   });
+                  continue messageLoop;
+                }
+
+                const batched = fromBinary(
+                  TelemetryBatchedPayloadSchema,
+                  envelope.payload
+                ) as TelemetryBatchedPayload;
+
+                if (attempt === 1) {
+                  metrics.consumed += 1;
+                }
+
+                // Skip batches already published in this process; still commit
+                // the offset so the duplicate is not redelivered forever.
+                if (dedup.has(batched.batchId)) {
+                  metrics.duplicatesSkipped += 1;
+                  logDebug('duplicate batch skipped', {
+                    batch_id: batched.batchId,
+                  });
+                } else {
+                  await publishBatched(
+                    batched,
+                    ipfsClient!,
+                    producer,
+                    config,
+                    metrics
+                  );
+                  dedup.add(batched.batchId);
+                }
+
+                // Commit offset only after successful publish (or dedup skip).
+                await consumer.commit({
+                  offsets: [
+                    {
+                      topic: TELEMETRY_TOPICS.BATCHED,
+                      partition: message.partition,
+                      offset: message.offset + 1n,
+                      leaderEpoch: -1,
+                    },
+                  ],
+                });
+
+                logDebug('kafka offset committed', {
+                  batch_id: batched.batchId,
+                  partition: message.partition,
+                  offset: (message.offset + 1n).toString(),
+                });
+
+                continue messageLoop;
+              } catch (error) {
+                const reason =
+                  error instanceof Error ? error.message : String(error);
+
+                if (attempt < MAX_PROCESS_ATTEMPTS) {
+                  logWarn('batch processing failed, retrying', {
+                    partition: message.partition,
+                    offset: message.offset.toString(),
+                    attempt,
+                    max_attempts: MAX_PROCESS_ATTEMPTS,
+                    error: reason,
+                  });
+                  await sleep(RETRY_BASE_DELAY_MS * attempt);
                   continue;
                 }
 
-                // Extract SignedEnvelope from payload
-                const payload = fromBinary(
-                  TelemetryAuthorizedPayloadSchema,
-                  envelope.payload
-                ) as TelemetryAuthorizedPayload;
-
-                const signedEnvelope = fromBinary(
-                  SignedEnvelopeSchema,
-                  payload.signedEnvelope
+                logError(
+                  'batch processing exhausted retries, routing to DLQ',
+                  error,
+                  {
+                    partition: message.partition,
+                    offset: message.offset.toString(),
+                  }
                 );
 
-                metrics.consumed += 1;
+                try {
+                  await publishToDlq(
+                    raw,
+                    message.partition,
+                    message.offset,
+                    reason,
+                    producer,
+                    config
+                  );
 
-                const batchItem: BatchItem = {
-                  signedEnvelope,
-                  offset: message.offset + 1n, // Next offset to commit
-                  partition: message.partition,
-                  sensorId: payload.sensorId,
-                  eventId: envelope.eventId,
-                };
-                if (envelope.traceId !== undefined) {
-                  batchItem.traceId = envelope.traceId;
-                }
-                currentBatch.push(batchItem);
-
-                logDebug('message added to batch', {
-                  event_id: envelope.eventId,
-                  trace_id: envelope.traceId,
-                  sensor_id: formatSensorId(payload.sensorId),
-                  batch_size: currentBatch.length,
-                  batch_max: config.batchSize,
-                });
-
-                // Check if batch is full
-                if (currentBatch.length >= config.batchSize) {
-                  logDebug('batch size reached', {
-                    batch_size: currentBatch.length,
-                  });
-                  await flushBatch();
-                } else {
-                  // Check lag to decide on batching strategy
-                  const lag = await getTotalLag(consumer, [
-                    TELEMETRY_TOPICS.AUTHORIZED,
-                  ]);
-
-                  logDebug('consumer lag check', {
-                    lag,
-                    batch_size: currentBatch.length,
-                    batch_max: config.batchSize,
+                  // Only commit past the poisoned message now that it is
+                  // durably routed to the DLQ, so nothing is silently lost.
+                  await consumer.commit({
+                    offsets: [
+                      {
+                        topic: TELEMETRY_TOPICS.BATCHED,
+                        partition: message.partition,
+                        offset: message.offset + 1n,
+                        leaderEpoch: -1,
+                      },
+                    ],
                   });
 
-                  if (lag < config.batchSize && currentBatch.length > 0) {
-                    // Not enough messages waiting, start/reset timer
-                    resetBatchTimer();
-                  } else if (lag >= config.batchSize) {
-                    // Many messages waiting, flush current batch to catch up
-                    logInfo('flushing batch early due to lag', {
-                      batch_size: currentBatch.length,
-                      lag,
-                    });
-                    await flushBatch();
-                  }
+                  logWarn('poisoned batch routed to DLQ and committed', {
+                    partition: message.partition,
+                    offset: message.offset.toString(),
+                  });
+                } catch (dlqError) {
+                  // Cannot safely commit past this message: stop consuming
+                  // rather than let a later message's commit skip past it.
+                  logError(
+                    'failed to route batch to DLQ; stopping consumption to avoid silent offset skip',
+                    dlqError,
+                    {
+                      partition: message.partition,
+                      offset: message.offset.toString(),
+                    }
+                  );
+                  break messageLoop;
                 }
-              } catch (error) {
-                logWarn('envelope parse error', {
-                  reason:
-                    error instanceof Error ? error.message : String(error),
-                });
               }
-            }
-          } finally {
-            // Cleanup timer
-            if (batchTimer) {
-              clearTimeout(batchTimer);
-            }
-
-            // Flush remaining batch on shutdown
-            if (currentBatch.length > 0 && !shouldStop) {
-              logInfo('flushing remaining batch on shutdown', {
-                batch_size: currentBatch.length,
-              });
-              await flushBatch().catch((error) => {
-                logError('failed to flush final batch', error);
-              });
             }
           }
         })();
@@ -514,6 +468,11 @@ export function createIpfsPublisherService(
       logInfo('stopping service');
 
       await consumer.close();
+
+      await runPromise?.catch(() => undefined);
+      runPromise = null;
+
+      await producer.close().catch(() => undefined);
       await ipfsClient?.stop();
       ipfsClient = null;
 
@@ -530,8 +489,6 @@ export function createIpfsPublisherService(
         healthServer = null;
       }
 
-      await runPromise?.catch(() => undefined);
-      runPromise = null;
       logInfo('service stopped');
     },
     getMetrics(): Readonly<IpfsPublisherMetrics> {
@@ -545,8 +502,7 @@ function startHealthAndMetricsServer(
   port: number
 ): Server {
   const server = createServer((request, response) => {
-    if (request.url === '/health') {
-      logDebug('health check requested');
+    if (request.url === '/health' || request.url === '/healthz') {
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');
       response.end(JSON.stringify({ status: 'ok' }));
@@ -560,6 +516,7 @@ function startHealthAndMetricsServer(
         consumed: metrics.consumed,
         batchesPublished: metrics.batchesPublished,
         eventsPublished: metrics.eventsPublished,
+        duplicatesSkipped: metrics.duplicatesSkipped,
         publishFailure: metrics.publishFailure,
       });
       response.statusCode = 200;
@@ -577,7 +534,7 @@ function startHealthAndMetricsServer(
 }
 
 /**
- * Create an IPFS Kubo RPC client for publishing binary data
+ * Create an IPFS Kubo RPC client for publishing binary data.
  */
 async function createIpfsKuboClient(apiUrl: string): Promise<IpfsClient> {
   const client: KuboRPCClient = createKuboClient({ url: apiUrl });

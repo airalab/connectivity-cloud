@@ -20,7 +20,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 
 ### Blockchain anchoring
 
-`Trusted Messages (Kafka) -> IPFS Publisher -> Message Bus (Kafka) -> Robonomics Blockchain`
+`Trusted Messages (Kafka) -> Batcher -> Message Bus (Kafka) -> IPFS Publisher -> Message Bus (Kafka) -> Robonomics Blockchain`
 
 ## Module responsibilities
 
@@ -65,14 +65,23 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 - Does not emit result events and does not participate in retry/DLQ commit-result semantics.
 - Fault isolation: failures in heartbeat tracking do not block telemetry pipeline.
 
+### Batcher
+- Consumes authorized events from `telemetry.authorized.v1`.
+- Groups events into deterministic batches by size, consumer lag, and a bounded flush timer.
+- Serializes each batch as a `crypto.v1.SignedEnvelopeBatch` and emits `telemetry.batched.v1`.
+- Serializes flushes (single active flush per instance) so a timer-triggered flush cannot publish the same batch as a size/lag-triggered flush.
+- Flushes any pending batch during graceful shutdown before closing resources.
+- Commits `telemetry.authorized.v1` offsets only after the batch is durably produced.
+
 ### IPFS Publisher
-- Consumes authorized events from Kafka.
-- Batches, produces IPFS object/CAR, publishes CID.
-- Emits `telemetry.ipfs.result.v1`.
-- Commits offset only after publish/pin success policy.
+- Consumes batched events from `telemetry.batched.v1`.
+- Publishes/pins each batch artifact to IPFS (optionally XZ-compressed) and captures the CID.
+- Deduplicates by `batch_id` to avoid duplicate publication of redelivered batches.
+- Emits `ipfs.published.v1` with `cid` and `event_count`.
+- Commits `telemetry.batched.v1` offsets only after publish success and result emission.
 
 ### Robonomics Blockchain
-- Consumes IPFS-published events (`telemetry.ipfs.result.v1`) from Kafka.
+- Consumes IPFS-published events (`ipfs.published.v1`) from Kafka.
 - Publishes the CID into the substrate-based Robonomics blockchain to make the CID immutable.
 - Deduplicates by CID before submission.
 - Emits anchoring result events (`telemetry.blockchain.result.v1`).
@@ -81,6 +90,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 ## Core Kafka topics
 - `telemetry.authorized.v1`
 - `telemetry.rejected.v1`
+- `telemetry.batched.v1`
 - `ipfs.published.v1`
 - `telemetry.dlq.v1`
 
@@ -96,5 +106,6 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
   - Endpoint -> PubSub
   - Endpoint -> IPFS
   - PubSub -> IPFS
+  - Batcher -> IPFS (must flow through Kafka)
   - IPFS -> Blockchain (must flow through Kafka)
 - Authentication is pluggable via `SensorAuth` interface but must use Redis for low-latency lookups.

@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-export interface IpfsPublisherConfig {
+export interface BatcherConfig {
   kafkaBrokers: string[];
   consumerGroupId: string;
   source: string;
   healthPort: number;
-  ipfsApiUrl: string;
-  enableCompression: boolean;
+  batchSize: number;
+  batchTimeoutMs: number;
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -27,18 +27,18 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function loadIpfsPublisherConfig(
+export function loadBatcherConfig(
   env: NodeJS.ProcessEnv = process.env
-): IpfsPublisherConfig {
+): BatcherConfig {
   return {
     kafkaBrokers: (env.KAFKA_BROKERS ?? 'localhost:9092')
       .split(',')
       .map((broker) => broker.trim())
       .filter((broker) => broker.length > 0),
-    consumerGroupId: env.IPFS_PUBLISHER_GROUP_ID ?? 'ipfs-publisher-v1',
-    source: env.IPFS_PUBLISHER_SOURCE ?? 'ipfs-publisher',
-    healthPort: parsePositiveInt(env.IPFS_PUBLISHER_HEALTH_PORT, 3040),
-    ipfsApiUrl: env.IPFS_API_URL ?? 'http://localhost:5001',
-    enableCompression: env.IPFS_PUBLISHER_ENABLE_COMPRESSION !== 'false',
+    consumerGroupId: env.BATCHER_GROUP_ID ?? 'batcher-v1',
+    source: env.BATCHER_SOURCE ?? 'batcher',
+    healthPort: parsePositiveInt(env.BATCHER_HEALTH_PORT, 3041),
+    batchSize: parsePositiveInt(env.BATCHER_BATCH_SIZE, 10),
+    batchTimeoutMs: parsePositiveInt(env.BATCHER_BATCH_TIMEOUT_MS, 30000),
   };
 }

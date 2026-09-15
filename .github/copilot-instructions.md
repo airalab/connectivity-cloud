@@ -39,7 +39,9 @@ This is an **event-driven telemetry pipeline** with Kafka as the central durable
 4. Multiple **downstream consumers** process authorized events independently:
    - **pubsub-broadcaster**: Publishes to libp2p/GossipSub for real-time web UI
    - **heartbeat-tracker**: Tracks sensor liveness/uptime metrics (observability-only, no DLQ)
-   - **ipfs-publisher**: Batches and publishes to IPFS, emits CIDs
+   - **batcher**: Batches authorized telemetry and emits `telemetry.batched.v1`
+5. **batcher** → **ipfs-publisher** → **blockchain-anchor** publication chain:
+   - **ipfs-publisher**: Consumes `telemetry.batched.v1`, publishes batches to IPFS, emits CIDs
    - **blockchain-anchor**: Anchors IPFS CIDs to Robonomics blockchain
 
 ### Key Architectural Constraints
@@ -58,8 +60,8 @@ Robonomics Blockchain → registry-sync → Redis → endpoint (lookup during va
 ### Core Kafka Topics
 - `telemetry.authorized.v1` - Successfully validated telemetry
 - `telemetry.rejected.v1` - Failed validation (signature/timestamp/auth)
-- `telemetry.pubsub.result.v1` - PubSub publish results
-- `telemetry.ipfs.result.v1` - IPFS publish results (includes CID)
+- `telemetry.batched.v1` - Batched authorized telemetry ready for publication
+- `ipfs.published.v1` - IPFS publish results (includes CID)
 - `telemetry.blockchain.result.v1` - Blockchain anchoring results
 - `telemetry.retry.v1` - Transient failures for retry
 - `telemetry.dlq.v1` - Exhausted retries (dead letters)
@@ -71,6 +73,7 @@ Robonomics Blockchain → registry-sync → Redis → endpoint (lookup during va
 - `services/whitelist` - Whitelist-based sensor auth provider
 - `services/pubsub-broadcaster` - Kafka→libp2p GossipSub bridge
 - `services/heartbeat-tracker` - Observability metrics (online sensors, uptime)
+- `services/batcher` - Kafka batcher (authorized → `telemetry.batched.v1`)
 - `services/ipfs-publisher` - Kafka→IPFS publisher (Kubo RPC)
 - `services/blockchain-anchor` - IPFS CID→blockchain anchoring
 - `tools/fake-sensor-cli` - Generate test telemetry with Ed25519 signatures
