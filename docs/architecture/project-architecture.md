@@ -81,7 +81,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 - Commits `telemetry.batched.v1` offsets only after publish success and result emission.
 
 ### Robonomics Blockchain
-- Consumes IPFS-published events (`telemetry.ipfs.result.v1`) from Kafka.
+- Consumes IPFS-published events (`ipfs.published.v1`) from Kafka.
 - Publishes the CID into the substrate-based Robonomics blockchain to make the CID immutable.
 - Deduplicates by CID before submission.
 - Emits anchoring result events (`telemetry.blockchain.result.v1`).

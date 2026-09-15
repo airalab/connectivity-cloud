@@ -96,4 +96,4 @@ Use `REJECTION_CODES` from `@scp/core` to reference these codes in your code:
 - **heartbeat-tracker**: Observability-only consumer of `telemetry.authorized.v1`, tracks sensor liveness (`firstSeen`, `lastSeen`, `onlineSince`) in Redis, exposes `sensors_online` count and per-sensor/aggregate uptime metrics over configurable online window (default 30s). Does not emit result events or participate in retry/DLQ.
 - **batcher**: Consumes `telemetry.authorized.v1`, groups events into deterministic batches (by size, lag, and a bounded flush timer), and emits `telemetry.batched.v1`. Serializes flushes (single active flush per instance) and flushes pending batches on graceful shutdown.
 - **ipfs-publisher**: Consumes `telemetry.batched.v1`, publishes/pins each batch to IPFS (optionally XZ-compressed), deduplicates by `batch_id`, emits `ipfs.published.v1`.
-- **blockchain-anchor**: Consumes `ipfs.published.v1`, deduplicates by CID, emits `telemetry.blockchain.result.v1`.
+- **blockchain-anchor**: Consumes `ipfs.published.v1` and anchors CIDs to the Robonomics blockchain.
