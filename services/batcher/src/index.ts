@@ -300,7 +300,11 @@ export function createBatcherService(
             }
             // The flusher serializes concurrent calls and re-attaches the batch
             // on failure; swallow the error here (already logged).
-            await flusher.flush().catch(() => undefined);
+await flusher.flush().catch(() => {
+              if (!shouldStop && flusher.size() > 0) {
+                resetBatchTimer();
+              }
+            });
           };
 
           const resetBatchTimer = () => {
