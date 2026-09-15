@@ -324,7 +324,9 @@ export function createIpfsPublisherService(
                   envelope.payload
                 ) as TelemetryBatchedPayload;
 
-                metrics.consumed += 1;
+                if (attempt === 1) {
+                  metrics.consumed += 1;
+                }
 
                 // Skip batches already published in this process; still commit
                 // the offset so the duplicate is not redelivered forever.
