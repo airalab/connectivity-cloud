@@ -24,32 +24,50 @@ import { fromBinary } from '@bufbuild/protobuf';
 import { Consumer } from '@platformatic/kafka';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import {
-  create as createKuboClient,
-  type KuboRPCClient,
-} from 'kubo-rpc-client';
 import pino from 'pino';
 import {
   loadPubsubBroadcasterConfig,
   type PubsubBroadcasterConfig,
 } from './config.js';
+import { createLibp2pPubsubClient } from './libp2p-node.js';
+import { createConnectivityMonitor } from './connectivity.js';
 
 interface PubsubBroadcasterMetrics {
   consumed: number;
   publishSuccess: number;
   publishFailure: number;
+  /** Connected reserved peer ids (bounded by the configured reserved peer list). */
+  connectedPeerIds: string[];
+  connectedPeerCount: number;
+  minConnectedPeers: number;
+  kafkaPaused: boolean;
+  pauseCount: number;
+  resumeCount: number;
 }
 
 export interface PubsubBroadcasterService {
   start(): Promise<void>;
   stop(): Promise<void>;
   getMetrics(): Readonly<PubsubBroadcasterMetrics>;
+  isReady(): boolean;
 }
 
 interface PubsubClient {
   start(): Promise<void>;
   stop(): Promise<void>;
   publish(topic: string, data: Uint8Array): Promise<void>;
+  getConnectedPeerIds?: () => string[];
+  getConnectedPeerCount?: () => number;
+}
+
+interface ConsumerMessagesStream extends AsyncIterable<{
+  topic: string;
+  partition: number;
+  offset: bigint;
+  value: Buffer | null;
+}> {
+  pause?: () => void;
+  resume?: () => void;
 }
 
 interface PubsubBroadcasterDeps {
@@ -57,6 +75,7 @@ interface PubsubBroadcasterDeps {
   createConsumer?: () => Consumer;
   createHealthServer?: (
     getMetrics: () => PubsubBroadcasterMetrics,
+    isReady: () => boolean,
     port: number
   ) => Server;
 }
@@ -158,6 +177,9 @@ export function handleTelemetryMessage(
   }
 }
 
+/** Upper bound on how often connectivity is re-evaluated against the threshold. */
+const MAX_CONNECTIVITY_POLL_INTERVAL_MS = 1000;
+
 export function createPubsubBroadcasterService(
   config: PubsubBroadcasterConfig = loadPubsubBroadcasterConfig(),
   deps: PubsubBroadcasterDeps = {}
@@ -171,7 +193,7 @@ export function createPubsubBroadcasterService(
     });
   const createPubsubClient =
     deps.createPubsubClient ??
-    (() => createIpfsPubsubClient(config.ipfsApiUrl));
+    (() => createLibp2pPubsubClient(config, { logInfo, logWarn }));
   const createHealthServer =
     deps.createHealthServer ?? startHealthAndMetricsServer;
 
@@ -179,19 +201,50 @@ export function createPubsubBroadcasterService(
   let started = false;
   let runPromise: Promise<void> | null = null;
   let healthServer: Server | null = null;
-  let consumerStream: AsyncIterable<{
-    topic: string;
-    partition: number;
-    offset: bigint;
-    value: Buffer | null;
-  }> | null = null;
+  let consumerStream: ConsumerMessagesStream | null = null;
+  let connectivityPollTimer: ReturnType<typeof setInterval> | null = null;
+  const monitoringEnabled = config.minConnectedPeers > 0;
   const metrics: PubsubBroadcasterMetrics = {
     consumed: 0,
     publishSuccess: 0,
     publishFailure: 0,
+    connectedPeerIds: [],
+    connectedPeerCount: 0,
+    minConnectedPeers: config.minConnectedPeers,
+    kafkaPaused: false,
+    pauseCount: 0,
+    resumeCount: 0,
   };
 
+  const connectivityMonitor = monitoringEnabled
+    ? createConnectivityMonitor({
+        minConnectedPeers: config.minConnectedPeers,
+        stabilizationIntervalMs: config.connectivityStabilizationIntervalMs,
+        getConnectedPeerCount: () =>
+          pubsubClient?.getConnectedPeerCount?.() ?? 0,
+        onPause: () => {
+          consumerStream?.pause?.();
+          metrics.kafkaPaused = true;
+          logWarn('pausing Kafka consumption; connected peers below minimum', {
+            connectedPeerCount: metrics.connectedPeerCount,
+            minConnectedPeers: config.minConnectedPeers,
+          });
+        },
+        onResume: () => {
+          consumerStream?.resume?.();
+          metrics.kafkaPaused = false;
+          logInfo('resuming Kafka consumption; connectivity recovered', {
+            connectedPeerCount: metrics.connectedPeerCount,
+            minConnectedPeers: config.minConnectedPeers,
+          });
+        },
+      })
+    : null;
+
   const getMetrics = (): PubsubBroadcasterMetrics => metrics;
+  const isReady = (): boolean =>
+    !monitoringEnabled ||
+    metrics.connectedPeerCount >= config.minConnectedPeers;
 
   return {
     async start(): Promise<void> {
@@ -205,7 +258,8 @@ export function createPubsubBroadcasterService(
         consumerGroupId: config.consumerGroupId,
         kafkaBrokers: config.kafkaBrokers,
         pubsubTopic: config.pubsubTopic,
-        ipfsApiUrl: config.ipfsApiUrl,
+        reservedPeers: config.reservedPeers,
+        minConnectedPeers: config.minConnectedPeers,
         healthPort: config.healthPort,
       });
 
@@ -218,7 +272,31 @@ export function createPubsubBroadcasterService(
           autocommit: true,
         });
 
-        healthServer = createHealthServer(getMetrics, config.healthPort);
+        healthServer = createHealthServer(
+          getMetrics,
+          isReady,
+          config.healthPort
+        );
+
+        if (connectivityMonitor) {
+          metrics.kafkaPaused = connectivityMonitor.isPaused();
+          if (metrics.kafkaPaused) {
+            consumerStream.pause?.();
+          }
+          const pollIntervalMs = Math.min(
+            MAX_CONNECTIVITY_POLL_INTERVAL_MS,
+            config.connectivityStabilizationIntervalMs
+          );
+          connectivityPollTimer = setInterval(() => {
+            metrics.connectedPeerIds =
+              pubsubClient?.getConnectedPeerIds?.() ?? [];
+            metrics.connectedPeerCount = metrics.connectedPeerIds.length;
+            connectivityMonitor.notify();
+            metrics.pauseCount = connectivityMonitor.getMetrics().pauseCount;
+            metrics.resumeCount = connectivityMonitor.getMetrics().resumeCount;
+          }, pollIntervalMs);
+          connectivityPollTimer.unref?.();
+        }
 
         runPromise = (async () => {
           for await (const message of consumerStream!) {
@@ -247,6 +325,11 @@ export function createPubsubBroadcasterService(
         started = false;
         runPromise = null;
 
+        if (connectivityPollTimer) {
+          clearInterval(connectivityPollTimer);
+          connectivityPollTimer = null;
+        }
+
         if (healthServer) {
           await new Promise<void>((resolve) => {
             healthServer?.close(() => {
@@ -272,6 +355,11 @@ export function createPubsubBroadcasterService(
 
       started = false;
       logInfo('stopping service');
+      if (connectivityPollTimer) {
+        clearInterval(connectivityPollTimer);
+        connectivityPollTimer = null;
+      }
+      connectivityMonitor?.stop();
       await consumer.close();
       await pubsubClient?.stop();
       pubsubClient = null;
@@ -295,19 +383,32 @@ export function createPubsubBroadcasterService(
     getMetrics(): Readonly<PubsubBroadcasterMetrics> {
       return metrics;
     },
+    isReady,
   };
 }
 
 function startHealthAndMetricsServer(
   getMetrics: () => PubsubBroadcasterMetrics,
+  isReady: () => boolean,
   port: number
 ): Server {
   const server = createServer((request, response) => {
     if (request.url === '/health') {
+      // Liveness: the process is up. Peer connectivity does not affect this.
       logDebug('health check requested');
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');
       response.end(JSON.stringify({ status: 'ok' }));
+      return;
+    }
+
+    if (request.url === '/ready') {
+      // Readiness: false when connected peers are below the configured minimum.
+      const ready = isReady();
+      logDebug('readiness check requested', { ready });
+      response.statusCode = ready ? 200 : 503;
+      response.setHeader('content-type', 'application/json; charset=utf-8');
+      response.end(JSON.stringify({ status: ready ? 'ok' : 'unavailable' }));
       return;
     }
 
@@ -318,6 +419,9 @@ function startHealthAndMetricsServer(
         consumed: metrics.consumed,
         publishSuccess: metrics.publishSuccess,
         publishFailure: metrics.publishFailure,
+        connectedPeerCount: metrics.connectedPeerCount,
+        minConnectedPeers: metrics.minConnectedPeers,
+        kafkaPaused: metrics.kafkaPaused,
       });
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');
@@ -333,49 +437,6 @@ function startHealthAndMetricsServer(
   return server;
 }
 
-/**
- * Create an IPFS Kubo RPC client for PubSub messaging
- */
-async function createIpfsPubsubClient(apiUrl: string): Promise<PubsubClient> {
-  const client: KuboRPCClient = createKuboClient({ url: apiUrl });
-  let started = false;
-
-  return {
-    async start() {
-      // Verify connection to Kubo
-      try {
-        const version = await client.version();
-        logInfo('connected to IPFS node', {
-          version: version.version,
-          apiUrl,
-        });
-        started = true;
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const wrappedError = new Error(
-          `Failed to connect to IPFS at ${apiUrl}: ${errorMessage}`,
-          { cause: error }
-        );
-        throw wrappedError;
-      }
-    },
-    async stop() {
-      if (!started) {
-        return;
-      }
-      started = false;
-      logInfo('IPFS pubsub client stopped');
-    },
-    async publish(topic: string, data: Uint8Array) {
-      if (!started) {
-        throw new Error('IPFS pubsub client not started');
-      }
-      await client.pubsub.publish(topic, data);
-    },
-  };
-}
-
 export async function startPubsubBroadcaster(): Promise<PubsubBroadcasterService> {
   const service = createPubsubBroadcasterService();
   await service.start();
@@ -385,8 +446,30 @@ export async function startPubsubBroadcaster(): Promise<PubsubBroadcasterService
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startPubsubBroadcaster().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startPubsubBroadcaster()
+    .then((service) => {
+      let shuttingDown = false;
+      const shutdown = (signal: NodeJS.Signals): void => {
+        if (shuttingDown) {
+          return;
+        }
+        shuttingDown = true;
+        logInfo('received shutdown signal', { signal });
+        service
+          .stop()
+          .then(() => {
+            process.exit(0);
+          })
+          .catch((error: unknown) => {
+            logError('error during graceful shutdown', error);
+            process.exit(1);
+          });
+      };
+      process.once('SIGTERM', () => shutdown('SIGTERM'));
+      process.once('SIGINT', () => shutdown('SIGINT'));
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }

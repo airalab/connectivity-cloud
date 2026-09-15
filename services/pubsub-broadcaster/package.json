@@ -13,9 +13,19 @@
     "dev": "tsx watch --env-file=../../.env src/index.ts"
   },
   "dependencies": {
+    "@chainsafe/libp2p-gossipsub": "14.1.2",
+    "@chainsafe/libp2p-noise": "16.1.5",
+    "@chainsafe/libp2p-yamux": "7.0.4",
+    "@libp2p/crypto": "5.1.8",
+    "@libp2p/identify": "3.0.39",
+    "@libp2p/interface": "2.11.0",
+    "@libp2p/peer-id": "5.1.9",
+    "@libp2p/tcp": "10.1.19",
+    "@libp2p/websockets": "9.2.19",
+    "@multiformats/multiaddr": "12.5.1",
     "@platformatic/kafka": "^2.9.0",
     "@scp/core": "workspace:*",
-    "kubo-rpc-client": "^4.1.1",
+    "libp2p": "2.10.0",
     "pino": "^10.3.1"
   },
   "devDependencies": {

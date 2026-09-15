@@ -52,7 +52,12 @@ function makeConfig(
     source: 'pubsub-broadcaster',
     healthPort: 3020,
     pubsubTopic: 'telemetry/authorized/v1',
-    ipfsApiUrl: 'http://localhost:5001',
+    reservedPeers: [],
+    minConnectedPeers: 0,
+    libp2pPrivateKeySeedHex: undefined,
+    libp2pListenAddresses: ['/ip4/0.0.0.0/tcp/0'],
+    connectivityStabilizationIntervalMs: 5000,
+    reconnectIntervalMs: 10000,
     ...overrides,
   };
 }

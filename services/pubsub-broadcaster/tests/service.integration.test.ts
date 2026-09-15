@@ -33,7 +33,12 @@ function testConfig(
     source: 'pubsub-broadcaster',
     healthPort: 3020,
     pubsubTopic: 'telemetry/authorized/v1',
-    ipfsApiUrl: 'http://localhost:5001',
+    reservedPeers: [],
+    minConnectedPeers: 0,
+    libp2pPrivateKeySeedHex: undefined,
+    libp2pListenAddresses: ['/ip4/0.0.0.0/tcp/0'],
+    connectivityStabilizationIntervalMs: 5000,
+    reconnectIntervalMs: 10000,
     ...overrides,
   };
 }
@@ -61,6 +66,79 @@ function createAuthorizedMessage() {
 }
 
 const authorizedMessage = createAuthorizedMessage();
+
+describe('pubsub broadcaster connectivity-based Kafka pause/resume', () => {
+  it('pauses Kafka consumption when connected peers drop below the minimum and resumes on recovery', async () => {
+    let connectedPeerCount = 2;
+    const pauseSpy: string[] = [];
+
+    async function* emptyStream() {
+      // No messages; the test only exercises pause()/resume() calls via the
+      // connectivity monitor, not actual message consumption.
+    }
+
+    const stream = emptyStream() as AsyncIterable<{
+      topic: string;
+      partition: number;
+      offset: bigint;
+      value: Buffer | null;
+    }> & { pause?: () => void; resume?: () => void };
+    stream.pause = () => pauseSpy.push('pause');
+    stream.resume = () => pauseSpy.push('resume');
+
+    const fakeConsumer = {
+      async consume() {
+        return stream;
+      },
+      async close() {},
+    };
+
+    const service = createPubsubBroadcasterService(
+      testConfig({
+        minConnectedPeers: 1,
+        connectivityStabilizationIntervalMs: 50,
+      }),
+      {
+        createConsumer: () => fakeConsumer as unknown as Consumer,
+        createPubsubClient: async () => ({
+          async start() {},
+          async stop() {},
+          async publish() {},
+          getConnectedPeerIds: () => (connectedPeerCount > 0 ? ['peer-1'] : []),
+          getConnectedPeerCount: () => connectedPeerCount,
+        }),
+        createHealthServer: () =>
+          ({
+            close(callback: (error?: Error) => void) {
+              callback();
+            },
+          }) as unknown as import('node:http').Server,
+      }
+    );
+
+    await service.start();
+    // Allow the connectivity poll loop to observe sufficient connectivity and resume.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(service.getMetrics().kafkaPaused).toBe(false);
+    expect(service.isReady()).toBe(true);
+
+    // Simulate peer loss.
+    connectedPeerCount = 0;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(service.getMetrics().kafkaPaused).toBe(true);
+    expect(service.isReady()).toBe(false);
+    expect(pauseSpy).toContain('pause');
+
+    // Simulate recovery.
+    connectedPeerCount = 1;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(service.getMetrics().kafkaPaused).toBe(false);
+    expect(service.isReady()).toBe(true);
+    expect(pauseSpy).toContain('resume');
+
+    await service.stop();
+  });
+});
 
 describe('pubsub broadcaster integration flow (mock harness)', () => {
   it('processes consume -> publish flow with autocommit', async () => {
