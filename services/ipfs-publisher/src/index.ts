@@ -29,12 +29,16 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { CID } from 'multiformats/cid';
 import { compress } from '@napi-rs/lzma/xz';
-import {
-  create as createKuboClient,
-  type KuboRPCClient,
-} from 'kubo-rpc-client';
 import { loadIpfsPublisherConfig, type IpfsPublisherConfig } from './config.js';
 import { logInfo, logWarn, logDebug, logError } from './logger.js';
+import {
+  MultiProviderIpfsClient,
+  type ProviderStat,
+} from './multi-provider-client.js';
+import {
+  createProvidersFromConfig,
+  type IpfsProvider,
+} from './providers/index.js';
 
 interface IpfsPublisherMetrics {
   consumed: number;
@@ -44,31 +48,35 @@ interface IpfsPublisherMetrics {
   publishFailure: number;
 }
 
+interface IpfsPublisherMetricsSnapshot extends IpfsPublisherMetrics {
+  durabilityFailures: number;
+  pendingReplications: number;
+  providers: Record<
+    string,
+    { success: number; failure: number; avgLatencyMs: number }
+  >;
+}
+
 export interface IpfsPublisherService {
   start(): Promise<void>;
   stop(): Promise<void>;
-  getMetrics(): Readonly<IpfsPublisherMetrics>;
-}
-
-interface IpfsClient {
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  add(data: Uint8Array, compressed: boolean): Promise<string>;
+  getMetrics(): Readonly<IpfsPublisherMetricsSnapshot>;
 }
 
 interface IpfsPublisherDeps {
-  createIpfsClient?: (apiUrl: string) => Promise<IpfsClient>;
+  createProviders?: (config: IpfsPublisherConfig) => IpfsProvider[];
   createConsumer?: () => Consumer;
   createProducer?: () => Producer;
   createHealthServer?: (
-    getMetrics: () => IpfsPublisherMetrics,
+    getMetrics: () => IpfsPublisherMetricsSnapshot,
     port: number
   ) => Server;
 }
 
 /**
  * Bounded set that remembers recently seen batch ids for in-process
- * deduplication, so a redelivered batch is not published to IPFS twice.
+ * deduplication, so a redelivered batch does not emit a duplicate
+ * `ipfs.published.v1` result event.
  */
 function createBoundedDedup(capacity: number): {
   has: (id: string) => boolean;
@@ -133,15 +141,19 @@ async function publishToDlq(
 }
 
 /**
- * Publish a single batched telemetry payload to IPFS and emit a
- * `ipfs.published.v1` result event.
+ * Publish a single batched telemetry payload across all configured IPFS
+ * providers and emit a `ipfs.published.v1` result event once the configured
+ * durability policy is satisfied. Safe to call again for the same batch
+ * (e.g. on Kafka redelivery): providers that already succeeded are not
+ * re-uploaded, and the result event is emitted at most once.
  */
 async function publishBatched(
   batched: TelemetryBatchedPayload,
-  ipfsClient: IpfsClient,
+  ipfsClient: MultiProviderIpfsClient,
   producer: Producer,
   config: IpfsPublisherConfig,
-  metrics: IpfsPublisherMetrics
+  metrics: IpfsPublisherMetrics,
+  emittedDedup: { has: (id: string) => boolean; add: (id: string) => void }
 ): Promise<void> {
   const uniqueSensorIds = Array.from(
     new Set(batched.sensorIds.map((id) => formatSensorId(id)))
@@ -154,59 +166,23 @@ async function publishBatched(
     sensor_ids: uniqueSensorIds,
   });
 
+  // Compress once (if enabled) so every provider receives identical bytes,
+  // preserving content (and CID, where the providers use compatible
+  // content-addressing) across providers.
+  const dataToPublish = config.enableCompression
+    ? await compress(batched.signedEnvelopeBatch)
+    : batched.signedEnvelopeBatch;
+
+  let result;
   try {
-    // Publish the pre-serialized SignedEnvelopeBatch, compressing at publish
-    // time so the wire format on the batched topic stays uncompressed.
-    const cid = await ipfsClient.add(
-      batched.signedEnvelopeBatch,
+    result = await ipfsClient.publish(
+      batched.batchId,
+      dataToPublish,
       config.enableCompression
     );
-
-    logInfo('batch published to IPFS', {
-      batch_id: batched.batchId,
-      cid,
-      event_count: batched.eventCount,
-      unique_sensors: uniqueSensorIds.length,
-      sensor_ids: uniqueSensorIds,
-      compression: config.enableCompression,
-    });
-
-    const payload = create(TelemetryIpfsPublishedPayloadSchema, {
-      cid: Buffer.from(CID.parse(cid).bytes),
-      eventCount: batched.eventCount,
-      compression: config.enableCompression ? Compression.XZ : Compression.NONE,
-    });
-
-    const resultEnvelope = create(EnvelopeSchema, {
-      eventId: randomUUID(),
-      eventType: TELEMETRY_TOPICS.IPFS_PUBLISHED,
-      eventVersion: '1.0.0',
-      occurredAt: new Date().toISOString(),
-      source: config.source,
-      payload: toBinary(TelemetryIpfsPublishedPayloadSchema, payload),
-    });
-
-    await producer.send({
-      messages: [
-        {
-          topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
-          value: Buffer.from(toBinary(EnvelopeSchema, resultEnvelope)),
-        },
-      ],
-    });
-
-    metrics.batchesPublished += 1;
-    metrics.eventsPublished += batched.eventCount;
-
-    logInfo('batch result published to Kafka', {
-      batch_id: batched.batchId,
-      cid,
-      event_count: batched.eventCount,
-      result_topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
-    });
   } catch (error) {
     metrics.publishFailure += 1;
-    logError('batch publish failed', error, {
+    logError('batch publish failed on all providers', error, {
       batch_id: batched.batchId,
       event_count: batched.eventCount,
       unique_sensors: uniqueSensorIds.length,
@@ -214,6 +190,74 @@ async function publishBatched(
     });
     throw error;
   }
+
+  const providerSummary = Object.fromEntries(
+    Array.from(result.providerOutcomes.entries()).map(([name, outcome]) => [
+      name,
+      outcome.success,
+    ])
+  );
+
+  logInfo('batch publish attempt completed', {
+    batch_id: batched.batchId,
+    cid: result.cid,
+    event_count: batched.eventCount,
+    unique_sensors: uniqueSensorIds.length,
+    sensor_ids: uniqueSensorIds,
+    compression: config.enableCompression,
+    durability_satisfied: result.durabilitySatisfied,
+    providers: providerSummary,
+  });
+
+  if (!result.durabilitySatisfied) {
+    metrics.publishFailure += 1;
+    throw new Error(
+      `durability policy "${config.durabilityPolicy}" not satisfied for batch ${batched.batchId} (providers: ${JSON.stringify(providerSummary)})`
+    );
+  }
+
+  if (emittedDedup.has(batched.batchId)) {
+    metrics.duplicatesSkipped += 1;
+    logDebug('ipfs.published event already emitted for batch; skipping', {
+      batch_id: batched.batchId,
+    });
+    return;
+  }
+
+  const payload = create(TelemetryIpfsPublishedPayloadSchema, {
+    cid: Buffer.from(CID.parse(result.cid).bytes),
+    eventCount: batched.eventCount,
+    compression: config.enableCompression ? Compression.XZ : Compression.NONE,
+  });
+
+  const resultEnvelope = create(EnvelopeSchema, {
+    eventId: randomUUID(),
+    eventType: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+    eventVersion: '1.0.0',
+    occurredAt: new Date().toISOString(),
+    source: config.source,
+    payload: toBinary(TelemetryIpfsPublishedPayloadSchema, payload),
+  });
+
+  await producer.send({
+    messages: [
+      {
+        topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+        value: Buffer.from(toBinary(EnvelopeSchema, resultEnvelope)),
+      },
+    ],
+  });
+
+  emittedDedup.add(batched.batchId);
+  metrics.batchesPublished += 1;
+  metrics.eventsPublished += batched.eventCount;
+
+  logInfo('batch result published to Kafka', {
+    batch_id: batched.batchId,
+    cid: result.cid,
+    event_count: batched.eventCount,
+    result_topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+  });
 }
 
 export function createIpfsPublisherService(
@@ -235,12 +279,13 @@ export function createIpfsPublisherService(
       bootstrapBrokers: config.kafkaBrokers,
     });
 
-  const createIpfsClient =
-    deps.createIpfsClient ?? ((apiUrl: string) => createIpfsKuboClient(apiUrl));
+  const createProviders =
+    deps.createProviders ??
+    ((cfg: IpfsPublisherConfig) => createProvidersFromConfig(cfg));
   const createHealthServer =
     deps.createHealthServer ?? startHealthAndMetricsServer;
 
-  let ipfsClient: IpfsClient | null = null;
+  let ipfsClient: MultiProviderIpfsClient | null = null;
   let started = false;
   let runPromise: Promise<void> | null = null;
   let healthServer: Server | null = null;
@@ -254,7 +299,31 @@ export function createIpfsPublisherService(
     publishFailure: 0,
   };
 
-  const getMetrics = (): IpfsPublisherMetrics => metrics;
+  const buildMetricsSnapshot = (): IpfsPublisherMetricsSnapshot => {
+    const providers: Record<
+      string,
+      { success: number; failure: number; avgLatencyMs: number }
+    > = {};
+    if (ipfsClient) {
+      for (const [name, stat] of ipfsClient.getProviderStats().entries()) {
+        const stats: ProviderStat = stat;
+        const totalAttempts = stats.success + stats.failure;
+        providers[name] = {
+          success: stats.success,
+          failure: stats.failure,
+          avgLatencyMs:
+            totalAttempts > 0 ? stats.totalLatencyMs / totalAttempts : 0,
+        };
+      }
+    }
+
+    return {
+      ...metrics,
+      durabilityFailures: ipfsClient?.getDurabilityFailureCount() ?? 0,
+      pendingReplications: ipfsClient?.getPendingReplicationCount() ?? 0,
+      providers,
+    };
+  };
 
   return {
     async start(): Promise<void> {
@@ -268,13 +337,23 @@ export function createIpfsPublisherService(
       logInfo('starting service', {
         consumerGroupId: config.consumerGroupId,
         kafkaBrokers: config.kafkaBrokers,
-        ipfsApiUrl: config.ipfsApiUrl,
+        providers: config.providers,
+        durabilityPolicy: config.durabilityPolicy,
+        durabilityMinSuccessCount: config.durabilityMinSuccessCount,
         enableCompression: config.enableCompression,
         healthPort: config.healthPort,
       });
 
       try {
-        ipfsClient = await createIpfsClient(config.ipfsApiUrl);
+        ipfsClient = new MultiProviderIpfsClient(createProviders(config), {
+          durability: {
+            policy: config.durabilityPolicy,
+            minSuccessCount: config.durabilityMinSuccessCount,
+          },
+          retryBaseDelayMs: config.providerRetryBaseDelayMs,
+          retryMaxDelayMs: config.providerRetryMaxDelayMs,
+          maxPendingReplications: config.providerReplicationMaxPending,
+        });
         await ipfsClient.start();
 
         const consumerStream = await consumer.consume({
@@ -282,10 +361,13 @@ export function createIpfsPublisherService(
           autocommit: false,
         });
 
-        healthServer = createHealthServer(getMetrics, config.healthPort);
+        healthServer = createHealthServer(
+          buildMetricsSnapshot,
+          config.healthPort
+        );
 
         runPromise = (async () => {
-          const dedup = createBoundedDedup(10000);
+          const emittedDedup = createBoundedDedup(10000);
 
           messageLoop: for await (const message of consumerStream) {
             if (shouldStop) {
@@ -328,25 +410,18 @@ export function createIpfsPublisherService(
                   metrics.consumed += 1;
                 }
 
-                // Skip batches already published in this process; still commit
-                // the offset so the duplicate is not redelivered forever.
-                if (dedup.has(batched.batchId)) {
-                  metrics.duplicatesSkipped += 1;
-                  logDebug('duplicate batch skipped', {
-                    batch_id: batched.batchId,
-                  });
-                } else {
-                  await publishBatched(
-                    batched,
-                    ipfsClient!,
-                    producer,
-                    config,
-                    metrics
-                  );
-                  dedup.add(batched.batchId);
-                }
+                await publishBatched(
+                  batched,
+                  ipfsClient!,
+                  producer,
+                  config,
+                  metrics,
+                  emittedDedup
+                );
 
-                // Commit offset only after successful publish (or dedup skip).
+                // Commit offset only once the configured durability policy
+                // is satisfied (checked inside publishBatched, which throws
+                // otherwise).
                 await consumer.commit({
                   offsets: [
                     {
@@ -491,14 +566,14 @@ export function createIpfsPublisherService(
 
       logInfo('service stopped');
     },
-    getMetrics(): Readonly<IpfsPublisherMetrics> {
-      return metrics;
+    getMetrics(): Readonly<IpfsPublisherMetricsSnapshot> {
+      return buildMetricsSnapshot();
     },
   };
 }
 
 function startHealthAndMetricsServer(
-  getMetrics: () => IpfsPublisherMetrics,
+  getMetrics: () => IpfsPublisherMetricsSnapshot,
   port: number
 ): Server {
   const server = createServer((request, response) => {
@@ -518,6 +593,8 @@ function startHealthAndMetricsServer(
         eventsPublished: metrics.eventsPublished,
         duplicatesSkipped: metrics.duplicatesSkipped,
         publishFailure: metrics.publishFailure,
+        durabilityFailures: metrics.durabilityFailures,
+        pendingReplications: metrics.pendingReplications,
       });
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');
@@ -531,49 +608,6 @@ function startHealthAndMetricsServer(
   server.listen({ host: '0.0.0.0', port });
   logInfo('HTTP server listening', { port, host: '0.0.0.0' });
   return server;
-}
-
-/**
- * Create an IPFS Kubo RPC client for publishing binary data.
- */
-async function createIpfsKuboClient(apiUrl: string): Promise<IpfsClient> {
-  const client: KuboRPCClient = createKuboClient({ url: apiUrl });
-  let started = false;
-
-  return {
-    async start() {
-      try {
-        const version = await client.version();
-        logInfo('connected to IPFS node', {
-          version: version.version,
-          apiUrl,
-        });
-        started = true;
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const wrappedError = new Error(
-          `Failed to connect to IPFS at ${apiUrl}: ${errorMessage}`,
-          { cause: error }
-        );
-        throw wrappedError;
-      }
-    },
-    async stop() {
-      if (!started) {
-        return;
-      }
-      started = false;
-      logInfo('IPFS client stopped');
-    },
-    async add(data: Uint8Array, compressed: boolean): Promise<string> {
-      if (!started) {
-        throw new Error('IPFS client not started');
-      }
-      const result = await client.add(compressed ? await compress(data) : data);
-      return result.cid.toString();
-    },
-  };
 }
 
 export async function startIpfsPublisher(): Promise<IpfsPublisherService> {

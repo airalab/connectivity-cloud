@@ -117,4 +117,71 @@ describe('loadIpfsPublisherConfig', () => {
     });
     expect(config2.enableCompression).toBe(true);
   });
+
+  it('defaults to a single kubo provider', () => {
+    const config = loadIpfsPublisherConfig({});
+
+    expect(config.providers).toEqual(['kubo']);
+    expect(config.durabilityPolicy).toBe('any');
+    expect(config.durabilityMinSuccessCount).toBe(1);
+    expect(config.pinataApiUrl).toBe('https://api.pinata.cloud');
+    expect(config.pinataJwt).toBe('');
+    expect(config.providerRetryBaseDelayMs).toBe(5000);
+    expect(config.providerRetryMaxDelayMs).toBe(60000);
+    expect(config.providerReplicationMaxPending).toBe(1000);
+  });
+
+  it('parses ordered multi-provider list', () => {
+    const config = loadIpfsPublisherConfig({
+      IPFS_PROVIDERS: 'pinata, kubo',
+    });
+
+    expect(config.providers).toEqual(['pinata', 'kubo']);
+  });
+
+  it('falls back to kubo when provider list is empty', () => {
+    const config = loadIpfsPublisherConfig({ IPFS_PROVIDERS: ' , ' });
+
+    expect(config.providers).toEqual(['kubo']);
+  });
+
+  it('parses pinata credentials', () => {
+    const config = loadIpfsPublisherConfig({
+      PINATA_API_URL: 'https://pinata.example.com',
+      PINATA_JWT: 'test-jwt',
+    });
+
+    expect(config.pinataApiUrl).toBe('https://pinata.example.com');
+    expect(config.pinataJwt).toBe('test-jwt');
+  });
+
+  it('parses durability policy and quorum count', () => {
+    const config = loadIpfsPublisherConfig({
+      IPFS_DURABILITY_POLICY: 'quorum',
+      IPFS_DURABILITY_MIN_SUCCESS_COUNT: '2',
+    });
+
+    expect(config.durabilityPolicy).toBe('quorum');
+    expect(config.durabilityMinSuccessCount).toBe(2);
+  });
+
+  it('falls back to "any" for an invalid durability policy', () => {
+    const config = loadIpfsPublisherConfig({
+      IPFS_DURABILITY_POLICY: 'bogus',
+    });
+
+    expect(config.durabilityPolicy).toBe('any');
+  });
+
+  it('parses retry/backoff settings', () => {
+    const config = loadIpfsPublisherConfig({
+      IPFS_PROVIDER_RETRY_BASE_DELAY_MS: '1000',
+      IPFS_PROVIDER_RETRY_MAX_DELAY_MS: '30000',
+      IPFS_PROVIDER_REPLICATION_MAX_PENDING: '50',
+    });
+
+    expect(config.providerRetryBaseDelayMs).toBe(1000);
+    expect(config.providerRetryMaxDelayMs).toBe(30000);
+    expect(config.providerReplicationMaxPending).toBe(50);
+  });
 });
