@@ -1,11 +1,11 @@
 {
-  "name": "connectivity",
+  "name": "connectivity-cloud",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "packageManager": "pnpm@11.21.0",
+  "packageManager": "pnpm@11.24.0",
   "engines": {
-    "node": ">=22.0.0",
+    "node": ">=24.0.0",
     "pnpm": ">=11.0.0"
   },
   "scripts": {
@@ -22,20 +22,20 @@
     "generate": "buf generate"
   },
   "devDependencies": {
-    "@bufbuild/buf": "^1.72.0",
+    "@bufbuild/buf": "^1.73.0",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.2.0",
-    "@typescript-eslint/eslint-plugin": "^8.67.0",
-    "@typescript-eslint/parser": "^8.67.0",
-    "eslint": "^10.8.1",
+    "@types/node": "^26.6.0",
+    "@typescript-eslint/eslint-plugin": "^8.70.0",
+    "@typescript-eslint/parser": "^8.70.0",
+    "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.6",
     "husky": "^9.1.7",
-    "lint-staged": "^17.3.0",
+    "lint-staged": "^17.5.1",
     "prettier": "^3.9.6",
-    "turbo": "^2.10.11",
+    "turbo": "^2.10.13",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.67.0",
+    "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11"
   },
   "lint-staged": {

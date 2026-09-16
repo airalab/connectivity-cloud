@@ -5,6 +5,5 @@ packages:
 allowBuilds:
   '@bufbuild/buf': true
   esbuild: false
-  node-liblzma: set this to true or false
 minimumReleaseAgeExclude:
   - '@buf/airalab_connectivity-protocol.bufbuild_es@2.14.0-20260828134001-309d77314e7b.1'
