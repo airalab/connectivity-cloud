@@ -19,6 +19,7 @@ import {
   TelemetryAuthorizedPayloadSchema,
   formatSensorId,
   type TelemetryAuthorizedPayload,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
 import { Consumer } from '@platformatic/kafka';
@@ -360,7 +361,13 @@ export function createPubsubBroadcasterService(
         connectivityPollTimer = null;
       }
       connectivityMonitor?.stop();
+      // Stop pulling new messages, then wait for any in-flight
+      // `handleTelemetryMessage` call to finish before stopping the PubSub
+      // client. Otherwise an autocommitted message could lose its publish
+      // if the client is stopped while the publish is still pending.
       await consumer.close();
+      await runPromise?.catch(() => undefined);
+      runPromise = null;
       await pubsubClient?.stop();
       pubsubClient = null;
       consumerStream = null;
@@ -376,8 +383,6 @@ export function createPubsubBroadcasterService(
         });
         healthServer = null;
       }
-      await runPromise?.catch(() => undefined);
-      runPromise = null;
       logInfo('service stopped');
     },
     getMetrics(): Readonly<PubsubBroadcasterMetrics> {
@@ -448,25 +453,11 @@ const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
   startPubsubBroadcaster()
     .then((service) => {
-      let shuttingDown = false;
-      const shutdown = (signal: NodeJS.Signals): void => {
-        if (shuttingDown) {
-          return;
-        }
-        shuttingDown = true;
-        logInfo('received shutdown signal', { signal });
-        service
-          .stop()
-          .then(() => {
-            process.exit(0);
-          })
-          .catch((error: unknown) => {
-            logError('error during graceful shutdown', error);
-            process.exit(1);
-          });
-      };
-      process.once('SIGTERM', () => shutdown('SIGTERM'));
-      process.once('SIGINT', () => shutdown('SIGINT'));
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
     })
     .catch((error: unknown) => {
       logError('failed to start (direct run)', error);

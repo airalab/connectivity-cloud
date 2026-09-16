@@ -19,6 +19,7 @@ import {
   TelemetryAuthorizedPayloadSchema,
   type TelemetryAuthorizedPayload,
   formatSensorId,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
 import Redis from 'ioredis';
@@ -507,7 +508,13 @@ export function createHeartbeatTrackerService(
 
       started = false;
       logInfo('stopping service');
+      // Stop pulling new messages, then wait for any in-flight
+      // `handleTelemetryMessage` call to finish before disconnecting Redis.
+      // Otherwise an autocommitted message could fail to record its
+      // heartbeat if Redis is quit while the write is still pending.
       await consumer.close();
+      await runPromise?.catch(() => undefined);
+      runPromise = null;
       if (typeof redis.quit === 'function') {
         await redis.quit();
       } else if (typeof redis.disconnect === 'function') {
@@ -525,8 +532,6 @@ export function createHeartbeatTrackerService(
         });
         healthServer = null;
       }
-      await runPromise?.catch(() => undefined);
-      runPromise = null;
       logInfo('service stopped');
     },
     getMetrics(): Promise<Readonly<HeartbeatTrackerMetrics>> {
@@ -586,8 +591,16 @@ export async function startHeartbeatTracker(): Promise<HeartbeatTrackerService> 
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startHeartbeatTracker().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startHeartbeatTracker()
+    .then((service) => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }

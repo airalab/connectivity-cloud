@@ -36,7 +36,10 @@ export function loadEndpointConfig(
   env: NodeJS.ProcessEnv = process.env
 ): EndpointConfig {
   return {
-    port: parsePositiveInt(env.ENDPOINT_PORT, 3000),
+    // Cloud Run injects the listening port via `PORT`; prefer it over the
+    // service-specific `ENDPOINT_PORT`, which remains as a fallback for
+    // local/non-Cloud-Run deployments.
+    port: parsePositiveInt(env.PORT ?? env.ENDPOINT_PORT, 3000),
     source: env.ENDPOINT_SOURCE ?? 'endpoint',
     kafkaBrokers: parseCsv(env.KAFKA_BROKERS, 'localhost:9092'),
     timestampSkewSeconds: parsePositiveInt(

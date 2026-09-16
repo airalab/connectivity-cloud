@@ -18,6 +18,7 @@ import {
   EnvelopeSchema,
   TelemetryIpfsPublishedPayloadSchema,
   type TelemetryIpfsPublishedPayload,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
 import { Consumer } from '@platformatic/kafka';
@@ -464,7 +465,19 @@ export function createBlockchainAnchorService(
       shouldStop = true;
       logInfo('stopping service');
 
+      // Stop pulling new messages, but do not disconnect the blockchain API
+      // yet: the run loop only checks `shouldStop` before fetching the next
+      // message, so a message whose extrinsic is currently in flight will
+      // run to completion. Disconnecting the API here would race that
+      // in-flight `signAndSend` and could drop/corrupt the submission.
       await consumer.close();
+
+      logInfo(
+        'waiting for in-flight processing to complete before disconnecting chain API'
+      );
+      await runPromise?.catch(() => undefined);
+      runPromise = null;
+
       await api?.disconnect();
       api = null;
       keyring = null;
@@ -482,8 +495,6 @@ export function createBlockchainAnchorService(
         healthServer = null;
       }
 
-      await runPromise?.catch(() => undefined);
-      runPromise = null;
       logInfo('service stopped');
     },
     getMetrics(): Readonly<BlockchainAnchorMetrics> {
@@ -536,8 +547,16 @@ export async function startBlockchainAnchor(): Promise<BlockchainAnchorService> 
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startBlockchainAnchor().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startBlockchainAnchor()
+    .then((service) => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }

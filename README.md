@@ -4,6 +4,7 @@ TypeScript monorepo for the event-driven telemetry pipeline described in:
 
 - [`project-architecture.md`](./docs/architecture/project-architecture.md)
 - [`integration-guide.md`](./docs/architecture/integration-guide.md)
+- [`cloud-run.md`](./docs/deployment/cloud-run.md) — Cloud Run deployment runbook
 
 ## Prerequisites
 

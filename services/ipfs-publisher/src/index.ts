@@ -21,12 +21,12 @@ import {
   TelemetryIpfsPublishedPayload_Compression as Compression,
   type TelemetryBatchedPayload,
   formatSensorId,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary, toBinary, create } from '@bufbuild/protobuf';
 import { Consumer, Producer } from '@platformatic/kafka';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import { CID } from 'multiformats/cid';
 import { compress } from '@napi-rs/lzma/xz';
 import { loadIpfsPublisherConfig, type IpfsPublisherConfig } from './config.js';
@@ -76,7 +76,14 @@ interface IpfsPublisherDeps {
 /**
  * Bounded set that remembers recently seen batch ids for in-process
  * deduplication, so a redelivered batch does not emit a duplicate
- * `ipfs.published.v1` result event.
+ * `ipfs.published.v1` result event within the lifetime of this process.
+ *
+ * This is a best-effort fast path only, not the durability guarantee: it is
+ * lost on restart. Durable idempotency instead comes from deriving the
+ * envelope's `event_id` deterministically from the batch id (see
+ * `publishBatched`), so a replay after a crash re-emits an event with the
+ * same identity rather than a new one, and `ipfs.published` is documented
+ * and consumed as an at-least-once, idempotent-by-event_id stream.
  */
 function createBoundedDedup(capacity: number): {
   has: (id: string) => boolean;
@@ -231,7 +238,16 @@ async function publishBatched(
   });
 
   const resultEnvelope = create(EnvelopeSchema, {
-    eventId: randomUUID(),
+    // Derive the event id deterministically from the durable batch id
+    // instead of a fresh random UUID. In-memory dedup (`emittedDedup`) is
+    // lost on process restart, so if this batch is redelivered after a
+    // crash between IPFS publish and Kafka offset commit, the re-emitted
+    // `ipfs.published` event carries the *same* event_id as the original.
+    // Downstream consumers that dedupe by event_id (or, like
+    // blockchain-anchor, by authoritative on-chain state) therefore observe
+    // an at-least-once but idempotent stream rather than silently gaining a
+    // second distinct logical event for the same batch.
+    eventId: batched.batchId,
     eventType: TELEMETRY_TOPICS.IPFS_PUBLISHED,
     eventVersion: '1.0.0',
     occurredAt: new Date().toISOString(),
@@ -619,8 +635,16 @@ export async function startIpfsPublisher(): Promise<IpfsPublisherService> {
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startIpfsPublisher().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startIpfsPublisher()
+    .then((service) => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }
