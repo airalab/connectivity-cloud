@@ -19,6 +19,7 @@ import {
   TelemetryAuthorizedPayloadSchema,
   type TelemetryAuthorizedPayload,
   formatSensorId,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
 import Redis from 'ioredis';
@@ -586,8 +587,16 @@ export async function startHeartbeatTracker(): Promise<HeartbeatTrackerService> 
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startHeartbeatTracker().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startHeartbeatTracker()
+    .then((service) => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }

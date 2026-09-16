@@ -20,6 +20,7 @@ import {
   TelemetryBatchedPayloadSchema,
   type TelemetryAuthorizedPayload,
   formatSensorId,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary, toBinary, create } from '@bufbuild/protobuf';
 import {
@@ -635,8 +636,16 @@ export async function startBatcher(): Promise<BatcherService> {
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startBatcher().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startBatcher()
+    .then((service) => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }

@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage Cloud Run image for @scp/registry-sync.
+# Multi-stage Cloud Run image for @scp/ipfs-publisher.
 #
 # Build from the monorepo root (not this directory), e.g.:
 #
-#   docker build -f services/registry-sync/Dockerfile \
+#   docker build -f services/ipfs-publisher/Dockerfile \
 #     --secret id=npmrc,src=$HOME/.npmrc \
-#     -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/registry-sync:${TAG}" .
+#     -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/ipfs-publisher:${TAG}" .
 #
 # The `npmrc` secret must authenticate the private Buf Schema Registry (BSR)
 # npm scope used by `@buf/airalab_connectivity-protocol.bufbuild_es` and by
@@ -30,7 +30,7 @@ FROM deps AS build
 # other workspace dependency of this service) is built before the service
 # itself without needing a separate step.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
-    pnpm --filter "...@scp/registry-sync" build
+    pnpm --filter "...@scp/ipfs-publisher" build
 
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
@@ -40,4 +40,4 @@ USER node
 # Cloud Run injects the listening port via $PORT; the endpoint HTTP service
 # reads it (see docs/deployment/cloud-run.md). Health/metrics ports for
 # worker-pool services are not publicly exposed by Cloud Run.
-CMD ["node", "services/registry-sync/dist/index.mjs"]
+CMD ["node", "services/ipfs-publisher/dist/index.mjs"]

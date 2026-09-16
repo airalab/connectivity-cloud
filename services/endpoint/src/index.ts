@@ -27,6 +27,7 @@ import {
   TelemetryRejectedPayloadSchema,
   TelemetryAuthorizedPayloadSchema,
 } from '@scp/core';
+import { installShutdownHandler } from '@scp/core';
 import {
   createRegistryReaderFromEnv,
   type RegistryReader,
@@ -255,7 +256,17 @@ export function createEndpointApp(
   return app;
 }
 
-export async function startEndpoint(): Promise<FastifyInstance> {
+export interface EndpointRuntime {
+  app: FastifyInstance;
+  /**
+   * Graceful shutdown: stop accepting new connections and let in-flight
+   * requests finish (Fastify's `close()`), then disconnect the Kafka
+   * producer only once no more requests can produce to it.
+   */
+  stop(): Promise<void>;
+}
+
+export async function startEndpoint(): Promise<EndpointRuntime> {
   const config = loadEndpointConfig();
   const authConfig = loadSensorAuthConfig();
 
@@ -292,13 +303,35 @@ export async function startEndpoint(): Promise<FastifyInstance> {
 
   await app.listen({ host: '0.0.0.0', port: config.port });
   logInfo('listening', { port: config.port });
-  return app;
+
+  return {
+    app,
+    async stop(): Promise<void> {
+      logInfo('stopping endpoint service');
+      // Stop accepting new connections and wait for in-flight requests
+      // (which may still be producing to Kafka) to complete before
+      // disconnecting the producer.
+      await app.close();
+      await kafkaProducer.close().catch((error: unknown) => {
+        logError('error closing Kafka producer during shutdown', error);
+      });
+      logInfo('endpoint service stopped');
+    },
+  };
 }
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startEndpoint().catch((error: unknown) => {
-    logError('failed to start', error);
-    process.exitCode = 1;
-  });
+  startEndpoint()
+    .then((runtime) => {
+      installShutdownHandler(() => runtime.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start', error);
+      process.exitCode = 1;
+    });
 }

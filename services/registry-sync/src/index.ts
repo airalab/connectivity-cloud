@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 import Redis from 'ioredis';
+import { installShutdownHandler } from '@scp/core';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import {
@@ -376,8 +377,17 @@ async function defaultSleep(ms: number): Promise<void> {
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
   const service = createRegistrySyncService();
-  service.start().catch((error: unknown) => {
-    logError('failed to start', error);
-    process.exitCode = 1;
-  });
+  service
+    .start()
+    .then(() => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start', error);
+      process.exitCode = 1;
+    });
 }
