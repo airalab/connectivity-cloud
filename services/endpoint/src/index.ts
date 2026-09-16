@@ -97,6 +97,15 @@ export function createEndpointApp(
   app.get('/health', async () => ({ status: 'ok' }));
   app.get('/metrics', async () => metrics);
 
+  // Rejection events are published fire-and-forget from request handlers so
+  // that Kafka latency never delays the HTTP response. Track the in-flight
+  // publishes here so `app.close()` can wait for them to settle before the
+  // Kafka producer is disconnected during shutdown.
+  const pendingRejectedPublishes = new Set<Promise<void>>();
+  app.addHook('onClose', async () => {
+    await Promise.allSettled(pendingRejectedPublishes);
+  });
+
   app.post(
     '/v1/telemetry',
     {
@@ -130,8 +139,8 @@ export function createEndpointApp(
           .send({ status: 'rejected', error_code: 'invalid_envelope' });
       }
 
-      const publishRejectedEvent = (payload: TelemetryRejectedPayload) =>
-        void deps.producer
+      const publishRejectedEvent = (payload: TelemetryRejectedPayload) => {
+        const publishPromise = deps.producer
           .publishRejected(payload, traceId)
           .then((eventId) => {
             logInfo('telemetry rejected event published', {
@@ -152,6 +161,11 @@ export function createEndpointApp(
               reason_code: payload.reasonCode,
             });
           });
+        pendingRejectedPublishes.add(publishPromise);
+        void publishPromise.finally(() =>
+          pendingRejectedPublishes.delete(publishPromise)
+        );
+      };
 
       const timestampMs = Number(parsedEnvelope.timestamp);
       const skewMs = Math.abs(Date.now() - timestampMs);

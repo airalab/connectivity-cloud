@@ -21,6 +21,7 @@ import {
   TelemetryIpfsPublishedPayload_Compression as Compression,
   type TelemetryBatchedPayload,
   formatSensorId,
+  installShutdownHandler,
 } from '@scp/core';
 import { fromBinary, toBinary, create } from '@bufbuild/protobuf';
 import { Consumer, Producer } from '@platformatic/kafka';
@@ -634,8 +635,16 @@ export async function startIpfsPublisher(): Promise<IpfsPublisherService> {
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirectRun) {
-  startIpfsPublisher().catch((error: unknown) => {
-    logError('failed to start (direct run)', error);
-    process.exitCode = 1;
-  });
+  startIpfsPublisher()
+    .then((service) => {
+      installShutdownHandler(() => service.stop(), {
+        onSignal: (signal) => logInfo('received shutdown signal', { signal }),
+        onShutdownError: (error) =>
+          logError('error during graceful shutdown', error),
+      });
+    })
+    .catch((error: unknown) => {
+      logError('failed to start (direct run)', error);
+      process.exitCode = 1;
+    });
 }

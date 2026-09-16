@@ -508,7 +508,13 @@ export function createHeartbeatTrackerService(
 
       started = false;
       logInfo('stopping service');
+      // Stop pulling new messages, then wait for any in-flight
+      // `handleTelemetryMessage` call to finish before disconnecting Redis.
+      // Otherwise an autocommitted message could fail to record its
+      // heartbeat if Redis is quit while the write is still pending.
       await consumer.close();
+      await runPromise?.catch(() => undefined);
+      runPromise = null;
       if (typeof redis.quit === 'function') {
         await redis.quit();
       } else if (typeof redis.disconnect === 'function') {
@@ -526,8 +532,6 @@ export function createHeartbeatTrackerService(
         });
         healthServer = null;
       }
-      await runPromise?.catch(() => undefined);
-      runPromise = null;
       logInfo('service stopped');
     },
     getMetrics(): Promise<Readonly<HeartbeatTrackerMetrics>> {

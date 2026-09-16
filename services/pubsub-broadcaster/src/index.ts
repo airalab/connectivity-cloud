@@ -361,7 +361,13 @@ export function createPubsubBroadcasterService(
         connectivityPollTimer = null;
       }
       connectivityMonitor?.stop();
+      // Stop pulling new messages, then wait for any in-flight
+      // `handleTelemetryMessage` call to finish before stopping the PubSub
+      // client. Otherwise an autocommitted message could lose its publish
+      // if the client is stopped while the publish is still pending.
       await consumer.close();
+      await runPromise?.catch(() => undefined);
+      runPromise = null;
       await pubsubClient?.stop();
       pubsubClient = null;
       consumerStream = null;
@@ -377,8 +383,6 @@ export function createPubsubBroadcasterService(
         });
         healthServer = null;
       }
-      await runPromise?.catch(() => undefined);
-      runPromise = null;
       logInfo('service stopped');
     },
     getMetrics(): Readonly<PubsubBroadcasterMetrics> {
