@@ -30,7 +30,6 @@ describe('verifyTelemetrySignature', () => {
     const pair = ed25519PairFromSeed(seed);
     const payload = {
       sensorId: pair.publicKey,
-      timestamp: BigInt(Date.now()),
       nonce: Uint8Array.from(Buffer.alloc(16, 8)),
       message: Uint8Array.from(Buffer.from('test-message')),
     };
@@ -50,7 +49,6 @@ describe('verifyTelemetrySignature', () => {
     const pair = ed25519PairFromSeed(seed);
     const payload = {
       sensorId: pair.publicKey,
-      timestamp: BigInt(Date.now()),
       nonce: Uint8Array.from(Buffer.alloc(16, 8)),
       message: Uint8Array.from(Buffer.from('test-message')),
     };

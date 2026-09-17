@@ -221,7 +221,7 @@ function parseSeedHex(seedHex: string): Uint8Array {
 }
 
 function createCoreMessageBytes(
-  ownerPublicKey: Uint8Array,
+  timestampMs: bigint,
   temperatureCelsius: number,
   humidityPercent: number
 ): Uint8Array {
@@ -231,7 +231,9 @@ function createCoreMessageBytes(
       value: create(BME280Schema, {
         measurement: {
           case: 'temperature',
-          value: create(TemperatureSchema, { celsius: temperatureCelsius }),
+          value: create(TemperatureSchema, {
+            centiCelsius: Math.round(temperatureCelsius * 100),
+          }),
         },
       }),
     },
@@ -243,7 +245,9 @@ function createCoreMessageBytes(
       value: create(BME280Schema, {
         measurement: {
           case: 'humidity',
-          value: create(HumiditySchema, { percent: humidityPercent }),
+          value: create(HumiditySchema, {
+            centiPercent: Math.round(humidityPercent * 100),
+          }),
         },
       }),
     },
@@ -255,7 +259,9 @@ function createCoreMessageBytes(
   });
 
   const message = create(MessageSchema, {
-    metadata: create(MetaSchema, { owner: ownerPublicKey }),
+    // node_id is omitted (defaults to 0); the fake sensor CLI has no real
+    // CPS registry identity to report.
+    metadata: create(MetaSchema, { timestamp: timestampMs }),
     payload: {
       case: 'urban',
       value: urban,
@@ -272,13 +278,12 @@ export function createFakeEnvelopePayload(
   const sensorId = pair.publicKey;
   const temperature = Number((18 + Math.random() * 8).toFixed(2));
   const humidity = Number((30 + Math.random() * 40).toFixed(2));
-  const message = createCoreMessageBytes(sensorId, temperature, humidity);
   const timestamp = BigInt(Date.now());
+  const message = createCoreMessageBytes(timestamp, temperature, humidity);
   const nonce = randomBytes(16);
 
   const signingBytes = buildEnvelopeSigningBytes({
     sensorId,
-    timestamp,
     nonce,
     message,
   });
@@ -286,7 +291,6 @@ export function createFakeEnvelopePayload(
 
   const envelope = create(SignedEnvelopeSchema, {
     sensorId,
-    timestamp,
     nonce,
     message,
     signature,

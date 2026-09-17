@@ -58,7 +58,6 @@ describe('core', () => {
   it('validates signed envelope protobuf bytes', async () => {
     const envelope = create(SignedEnvelopeSchema, {
       sensorId: Buffer.alloc(32, 1),
-      timestamp: BigInt(Date.now()),
       nonce: Buffer.alloc(16, 2),
       message: Buffer.from('abc'),
       signature: Buffer.alloc(64, 4),

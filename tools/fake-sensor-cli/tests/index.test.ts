@@ -99,7 +99,8 @@ describe('fake sensor CLI', () => {
     const envelope = fromBinary(SignedEnvelopeSchema, payload.envelopeBytes);
     const message = fromBinary(MessageSchema, envelope.message);
     expect(message.metadata).toBeDefined();
-    expect(message.metadata?.owner).toHaveLength(32);
+    expect(message.metadata?.nodeId).toBe(0n);
+    expect(message.metadata?.timestamp).toBe(payload.timestamp);
     expect(message.payload?.case).toBe('urban');
     expect(message.payload?.value?.public).toHaveLength(2);
 
@@ -109,14 +110,14 @@ describe('fake sensor CLI', () => {
       'temperature'
     );
     expect(
-      publicSensors?.[0]?.sensor?.value?.measurement?.value?.celsius
+      publicSensors?.[0]?.sensor?.value?.measurement?.value?.centiCelsius
     ).toBeTypeOf('number');
     expect(publicSensors?.[1]?.sensor?.case).toBe('bme280');
     expect(publicSensors?.[1]?.sensor?.value?.measurement?.case).toBe(
       'humidity'
     );
     expect(
-      publicSensors?.[1]?.sensor?.value?.measurement?.value?.percent
+      publicSensors?.[1]?.sensor?.value?.measurement?.value?.centiPercent
     ).toBeTypeOf('number');
   });
 

@@ -22,6 +22,7 @@ import {
 import { buildEnvelopeSigningBytes, REJECTION_CODES } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
 import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
+import { MessageSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/core/v1/message_pb.js';
 import { createEndpointApp } from '../src/index.js';
 import { InMemoryRegistryReader } from '@scp/registry-sync';
 
@@ -33,11 +34,15 @@ async function buildSignedEnvelopeBytes(
   const seed = Uint8Array.from(Array.from({ length: 32 }, () => seedByte));
   const pair = ed25519PairFromSeed(seed);
   const nonce = Uint8Array.from(Buffer.alloc(16, 1));
-  const message = Uint8Array.from(Buffer.from('payload'));
+  const message = toBinary(
+    MessageSchema,
+    create(MessageSchema, {
+      metadata: { timestamp },
+    })
+  );
 
   const signingBytes = buildEnvelopeSigningBytes({
     sensorId: pair.publicKey,
-    timestamp,
     nonce,
     message,
   });
@@ -45,7 +50,6 @@ async function buildSignedEnvelopeBytes(
 
   const envelope = create(SignedEnvelopeSchema, {
     sensorId: pair.publicKey,
-    timestamp,
     nonce,
     message,
     signature,

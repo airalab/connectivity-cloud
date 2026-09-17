@@ -53,7 +53,6 @@ function createAuthorizedMessage(
 ): FakeMessage {
   const signedEnvelope = create(SignedEnvelopeSchema, {
     sensorId: Buffer.alloc(32, 1),
-    timestamp: BigInt(Date.parse('2026-01-01T00:00:00Z')),
     nonce: Buffer.alloc(16, 2),
     message: Buffer.from(JSON.stringify({ temp: 25 })),
     signature: Buffer.alloc(64, 3),

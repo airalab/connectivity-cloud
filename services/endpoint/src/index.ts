@@ -17,8 +17,9 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { fileURLToPath } from 'node:url';
-import { create } from '@bufbuild/protobuf';
+import { create, fromBinary } from '@bufbuild/protobuf';
 import { SignedEnvelope } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
+import { MessageSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/core/v1/message_pb.js';
 import type { TelemetryRejectedPayload } from '@scp/core';
 import {
   formatSensorId,
@@ -56,6 +57,7 @@ export interface EndpointAppOptions {
 async function parseSignedEnvelope(request: FastifyRequest): Promise<{
   envelope: SignedEnvelope;
   rawBytes: Uint8Array;
+  timestampMs: number;
 }> {
   const contentType = request.headers['content-type']?.toLowerCase() ?? '';
   if (
@@ -68,7 +70,13 @@ async function parseSignedEnvelope(request: FastifyRequest): Promise<{
     throw new Error('Expected binary protobuf request body');
   }
   const rawBytes = Uint8Array.from(request.body);
-  return { envelope: await validateSignedEnvelope(rawBytes, true), rawBytes };
+  const envelope = await validateSignedEnvelope(rawBytes, true);
+  // The measurement timestamp now lives in `core.v1.Message.metadata.timestamp`
+  // rather than on `SignedEnvelope` (moved so the message stays
+  // self-contained; see connectivity-protocol v1-beta.2).
+  const message = fromBinary(MessageSchema, envelope.message);
+  const timestampMs = Number(message.metadata?.timestamp ?? 0n);
+  return { envelope, rawBytes, timestampMs };
 }
 
 export function createEndpointApp(
@@ -120,11 +128,13 @@ export function createEndpointApp(
       const traceId = request.headers['x-request-id']?.toString() ?? request.id;
       let parsedEnvelope: SignedEnvelope;
       let rawEnvelopeBytes: Uint8Array;
+      let timestampMs: number;
 
       try {
         const parsed = await parseSignedEnvelope(request);
         parsedEnvelope = parsed.envelope;
         rawEnvelopeBytes = parsed.rawBytes;
+        timestampMs = parsed.timestampMs;
       } catch (error) {
         metrics.rejected += 1;
         logWarn(
@@ -167,7 +177,6 @@ export function createEndpointApp(
         );
       };
 
-      const timestampMs = Number(parsedEnvelope.timestamp);
       const skewMs = Math.abs(Date.now() - timestampMs);
       if (
         !Number.isSafeInteger(timestampMs) ||

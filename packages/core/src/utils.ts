@@ -47,14 +47,9 @@ export function concatBytes(parts: Uint8Array[]): Uint8Array {
 }
 
 export function buildEnvelopeSigningBytes(
-  envelope: Pick<SignedEnvelope, 'sensorId' | 'timestamp' | 'nonce' | 'message'>
+  envelope: Pick<SignedEnvelope, 'sensorId' | 'nonce' | 'message'>
 ): Uint8Array {
-  return concatBytes([
-    envelope.sensorId,
-    timestampToLeBytes(envelope.timestamp),
-    envelope.nonce,
-    envelope.message,
-  ]);
+  return concatBytes([envelope.sensorId, envelope.nonce, envelope.message]);
 }
 
 /**

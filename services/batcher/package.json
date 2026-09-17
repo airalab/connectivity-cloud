@@ -13,7 +13,7 @@
     "dev": "tsx watch --env-file=../../.env src/index.ts"
   },
   "dependencies": {
-    "@buf/airalab_connectivity-protocol.bufbuild_es": "2.14.0-20260828134001-309d77314e7b.1",
+    "@buf/airalab_connectivity-protocol.bufbuild_es": "2.14.0-20260917143433-6f6f1eba1cc0.2",
     "@platformatic/kafka": "^2.9.0",
     "@scp/core": "workspace:*",
     "pino": "^10.3.1"

@@ -58,14 +58,12 @@ describe('batcher contract compatibility', () => {
   it('produces valid telemetry.batched.v1 envelope carrying a SignedEnvelopeBatch', () => {
     const signedEnvelope1 = create(SignedEnvelopeSchema, {
       sensorId: Buffer.alloc(32, 1),
-      timestamp: BigInt(Date.now()),
       nonce: Buffer.alloc(16, 2),
       message: Buffer.from(JSON.stringify({ temp: 20 })),
       signature: Buffer.alloc(64, 3),
     });
     const signedEnvelope2 = create(SignedEnvelopeSchema, {
       sensorId: Buffer.alloc(32, 4),
-      timestamp: BigInt(Date.now()),
       nonce: Buffer.alloc(16, 5),
       message: Buffer.from(JSON.stringify({ temp: 22 })),
       signature: Buffer.alloc(64, 6),
