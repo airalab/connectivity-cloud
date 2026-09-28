@@ -20,8 +20,8 @@ import {
   type TelemetryBatchedPayload,
   installShutdownHandler,
 } from '@scp/core';
-import { fromBinary } from '@bufbuild/protobuf';
-import { Consumer } from '@platformatic/kafka';
+import { fromBinary, type MessageShape } from '@bufbuild/protobuf';
+import { Consumer, Producer } from '@platformatic/kafka';
 import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,7 @@ export interface BlockchainAnchorService {
 
 export interface BlockchainAnchorDeps {
   createConsumer?: () => Consumer;
+  createProducer?: () => Producer;
   createApi?: () => Promise<ApiPromise>;
   createHealthServer?: (
     getMetrics: () => BlockchainAnchorMetrics,
@@ -113,6 +114,45 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     }
   }
   return true;
+}
+
+/**
+ * Forward an oversized `telemetry.batched.v1` record to the DLQ topic,
+ * preserving its original bytes. This is a permanent upstream contract
+ * violation (the batcher is supposed to guarantee `payload <=
+ * maxPayloadBytes`), so the record must be durably routed to the DLQ rather
+ * than silently dropped: the offset is only committed after this publish is
+ * confirmed.
+ */
+async function publishOversizedToDlq(
+  raw: Uint8Array,
+  partition: number,
+  offset: bigint,
+  reason: string,
+  producer: Producer,
+  config: BlockchainAnchorConfig
+): Promise<void> {
+  await producer.send({
+    messages: [
+      {
+        topic: TELEMETRY_TOPICS.DLQ,
+        value: Buffer.from(raw),
+        headers: {
+          source_topic: Buffer.from(TELEMETRY_TOPICS.BATCHED),
+          source_service: Buffer.from(config.source),
+          source_partition: Buffer.from(String(partition)),
+          source_offset: Buffer.from(String(offset)),
+          reason: Buffer.from(reason),
+        },
+      },
+    ],
+  });
+
+  logWarn('oversized batch routed to DLQ', {
+    partition,
+    offset: offset.toString(),
+    dlq_topic: TELEMETRY_TOPICS.DLQ,
+  });
 }
 
 /**
@@ -252,6 +292,13 @@ export function createBlockchainAnchorService(
       bootstrapBrokers: config.kafkaBrokers,
     });
 
+  const producer =
+    deps.createProducer?.() ??
+    new Producer({
+      clientId: 'blockchain-anchor',
+      bootstrapBrokers: config.kafkaBrokers,
+    });
+
   const createHealthServer =
     deps.createHealthServer ?? startHealthAndMetricsServer;
 
@@ -326,8 +373,10 @@ export function createBlockchainAnchorService(
                 continue;
               }
 
+              let envelope: MessageShape<typeof EnvelopeSchema>;
+              let payload: TelemetryBatchedPayload;
               try {
-                const envelope = fromBinary(
+                envelope = fromBinary(
                   EnvelopeSchema,
                   new Uint8Array(message.value)
                 );
@@ -339,127 +388,10 @@ export function createBlockchainAnchorService(
                   continue;
                 }
 
-                const payload = fromBinary(
+                payload = fromBinary(
                   TelemetryBatchedPayloadSchema,
                   envelope.payload
                 ) as TelemetryBatchedPayload;
-
-                metrics.consumed += 1;
-
-                // Defensive size invariant: the batcher owns payload fitting,
-                // but blockchain-anchor must not submit a payload that
-                // violates the CPS size limit. This is a permanent upstream
-                // contract error, not a transient failure — do not split the
-                // batch here, and do not retry.
-                if (payload.payload.length > config.maxPayloadBytes) {
-                  metrics.rejectedOversized += 1;
-                  logError(
-                    'rejecting batch: payload exceeds ANCHOR_MAX_PAYLOAD_BYTES',
-                    new Error('ANCHOR_PAYLOAD_TOO_LARGE'),
-                    {
-                      batch_id: payload.batchId,
-                      payload_size: payload.payload.length,
-                      max_payload_bytes: config.maxPayloadBytes,
-                      node_id: config.nodeId,
-                    }
-                  );
-
-                  // Commit the offset: this is a permanent contract
-                  // violation upstream, retrying will not help.
-                  await consumer.commit({
-                    offsets: [
-                      {
-                        topic: TELEMETRY_TOPICS.BATCHED,
-                        partition: message.partition,
-                        offset: message.offset + 1n,
-                        leaderEpoch: -1,
-                      },
-                    ],
-                  });
-                  continue;
-                }
-
-                logInfo('anchoring batch to blockchain', {
-                  event_id: envelope.eventId,
-                  batch_id: payload.batchId,
-                  payload_size: payload.payload.length,
-                  event_count: payload.eventCount,
-                  node_id: config.nodeId,
-                });
-
-                try {
-                  // Idempotency check: ask the chain what is currently
-                  // anchored for this node before submitting a new
-                  // extrinsic. This covers the crash window between
-                  // extrinsic finalization and Kafka offset commit - on
-                  // redelivery the on-chain state already reflects the
-                  // anchor, so we skip re-submission instead of creating a
-                  // duplicate logical anchor operation.
-                  const anchoredPayload = await getAnchoredPayload(
-                    api!,
-                    config.nodeId
-                  );
-
-                  if (
-                    anchoredPayload !== null &&
-                    bytesEqual(anchoredPayload, payload.payload)
-                  ) {
-                    metrics.skippedDuplicate += 1;
-
-                    logInfo(
-                      'batch already anchored on-chain; skipping duplicate submission',
-                      {
-                        batch_id: payload.batchId,
-                        payload_size: payload.payload.length,
-                        event_id: envelope.eventId,
-                        node_id: config.nodeId,
-                      }
-                    );
-                  } else {
-                    await sendSetPayloadExtrinsic(
-                      api!,
-                      keyring!,
-                      config.suri,
-                      config.nodeId,
-                      payload.payload
-                    );
-
-                    metrics.anchored += 1;
-
-                    logInfo('batch anchored successfully', {
-                      batch_id: payload.batchId,
-                      payload_size: payload.payload.length,
-                      event_count: payload.eventCount,
-                      node_id: config.nodeId,
-                    });
-                  }
-
-                  // Commit offset only after successful anchoring (or a
-                  // confirmed no-op due to the idempotency check above)
-                  await consumer.commit({
-                    offsets: [
-                      {
-                        topic: TELEMETRY_TOPICS.BATCHED,
-                        partition: message.partition,
-                        offset: message.offset + 1n,
-                        leaderEpoch: -1,
-                      },
-                    ],
-                  });
-
-                  logDebug('kafka offset committed', {
-                    partition: message.partition,
-                    offset: (message.offset + 1n).toString(),
-                  });
-                } catch (error) {
-                  metrics.failed += 1;
-                  logError('failed to anchor batch', error, {
-                    batch_id: payload.batchId,
-                    payload_size: payload.payload.length,
-                    node_id: config.nodeId,
-                  });
-                  // Don't commit offset on failure - message will be retried
-                }
               } catch (error) {
                 logWarn('envelope parse error', {
                   reason:
@@ -476,6 +408,140 @@ export function createBlockchainAnchorService(
                     },
                   ],
                 });
+                continue;
+              }
+
+              metrics.consumed += 1;
+
+              // Defensive size invariant: the batcher owns payload fitting,
+              // but blockchain-anchor must not submit a payload that
+              // violates the CPS size limit. This is a permanent upstream
+              // contract error, not a transient failure — do not split the
+              // batch here, and do not retry. The record is still routed to
+              // the DLQ (instead of being silently dropped) so it can be
+              // inspected/recovered, and the offset is only committed once
+              // that publish is confirmed.
+              if (payload.payload.length > config.maxPayloadBytes) {
+                metrics.rejectedOversized += 1;
+                logError(
+                  'rejecting batch: payload exceeds ANCHOR_MAX_PAYLOAD_BYTES',
+                  new Error('ANCHOR_PAYLOAD_TOO_LARGE'),
+                  {
+                    batch_id: payload.batchId,
+                    payload_size: payload.payload.length,
+                    max_payload_bytes: config.maxPayloadBytes,
+                    node_id: config.nodeId,
+                  }
+                );
+
+                await publishOversizedToDlq(
+                  new Uint8Array(message.value),
+                  message.partition,
+                  message.offset,
+                  'ANCHOR_PAYLOAD_TOO_LARGE',
+                  producer,
+                  config
+                );
+
+                await consumer.commit({
+                  offsets: [
+                    {
+                      topic: TELEMETRY_TOPICS.BATCHED,
+                      partition: message.partition,
+                      offset: message.offset + 1n,
+                      leaderEpoch: -1,
+                    },
+                  ],
+                });
+                continue;
+              }
+
+              logInfo('anchoring batch to blockchain', {
+                event_id: envelope.eventId,
+                batch_id: payload.batchId,
+                payload_size: payload.payload.length,
+                event_count: payload.eventCount,
+                node_id: config.nodeId,
+              });
+
+              try {
+                // Idempotency check: ask the chain what is currently
+                // anchored for this node before submitting a new
+                // extrinsic. This covers the crash window between
+                // extrinsic finalization and Kafka offset commit - on
+                // redelivery the on-chain state already reflects the
+                // anchor, so we skip re-submission instead of creating a
+                // duplicate logical anchor operation.
+                const anchoredPayload = await getAnchoredPayload(
+                  api!,
+                  config.nodeId
+                );
+
+                if (
+                  anchoredPayload !== null &&
+                  bytesEqual(anchoredPayload, payload.payload)
+                ) {
+                  metrics.skippedDuplicate += 1;
+
+                  logInfo(
+                    'batch already anchored on-chain; skipping duplicate submission',
+                    {
+                      batch_id: payload.batchId,
+                      payload_size: payload.payload.length,
+                      event_id: envelope.eventId,
+                      node_id: config.nodeId,
+                    }
+                  );
+                } else {
+                  await sendSetPayloadExtrinsic(
+                    api!,
+                    keyring!,
+                    config.suri,
+                    config.nodeId,
+                    payload.payload
+                  );
+
+                  metrics.anchored += 1;
+
+                  logInfo('batch anchored successfully', {
+                    batch_id: payload.batchId,
+                    payload_size: payload.payload.length,
+                    event_count: payload.eventCount,
+                    node_id: config.nodeId,
+                  });
+                }
+
+                // Commit offset only after successful anchoring (or a
+                // confirmed no-op due to the idempotency check above)
+                await consumer.commit({
+                  offsets: [
+                    {
+                      topic: TELEMETRY_TOPICS.BATCHED,
+                      partition: message.partition,
+                      offset: message.offset + 1n,
+                      leaderEpoch: -1,
+                    },
+                  ],
+                });
+
+                logDebug('kafka offset committed', {
+                  partition: message.partition,
+                  offset: (message.offset + 1n).toString(),
+                });
+              } catch (error) {
+                metrics.failed += 1;
+                logError('failed to anchor batch', error, {
+                  batch_id: payload.batchId,
+                  payload_size: payload.payload.length,
+                  node_id: config.nodeId,
+                });
+                // Don't commit offset on failure. Stop consuming further
+                // messages instead of continuing the loop: a later
+                // message's commit would advance the committed offset past
+                // this unretried one, silently losing it. Rethrowing exits
+                // the loop (and the run promise) so the process can be
+                // restarted and resume from the last committed offset.
+                throw error;
               }
             }
           } catch (error) {
@@ -533,6 +599,8 @@ export function createBlockchainAnchorService(
       await api?.disconnect();
       api = null;
       keyring = null;
+
+      await producer.close().catch(() => undefined);
 
       if (healthServer) {
         await new Promise<void>((resolve, reject) => {

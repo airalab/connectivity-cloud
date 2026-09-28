@@ -24,6 +24,8 @@ export interface BlockchainAnchorConfig {
   healthPort: number;
   /** Maximum size, in bytes, of a chain-ready compressed payload (defensive check). */
   maxPayloadBytes: number;
+  /** Value used as the `source_service` DLQ header when forwarding records. */
+  source: string;
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -69,5 +71,6 @@ export function loadBlockchainAnchorConfig(
       env.ANCHOR_MAX_PAYLOAD_BYTES,
       DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES
     ),
+    source: env.BLOCKCHAIN_ANCHOR_SOURCE ?? 'blockchain-anchor',
   };
 }

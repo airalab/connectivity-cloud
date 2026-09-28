@@ -79,13 +79,18 @@ interface BatchItem {
   eventId?: string;
   /** Reason the envelope failed to parse; set only for poison items. */
   parseError?: string;
-  /** Original raw bytes; set only for poison items, for DLQ forwarding. */
-  raw?: Uint8Array;
+  /**
+   * Original raw bytes of the source `telemetry.authorized.v1` Kafka record
+   * (the serialized `Envelope`). Set for every item so it can be forwarded
+   * verbatim to the DLQ, whether the record is a poison (unparseable) item
+   * or a valid item that later turns out to be oversized.
+   */
+  raw: Uint8Array;
 }
 
 /** A batch item that parsed successfully and carries a valid envelope. */
 type ValidBatchItem = BatchItem &
-  Required<Pick<BatchItem, 'signedEnvelope' | 'sensorId' | 'eventId'>>;
+  Required<Pick<BatchItem, 'signedEnvelope' | 'sensorId' | 'eventId' | 'raw'>>;
 
 function isValidItem(item: BatchItem): item is ValidBatchItem {
   return item.parseError === undefined;
@@ -121,7 +126,7 @@ async function publishPoisonToDlq(
   await producer.send({
     messages: poisonItems.map((item) => ({
       topic: TELEMETRY_TOPICS.DLQ,
-      value: Buffer.from(item.raw ?? new Uint8Array()),
+      value: Buffer.from(item.raw),
       headers: {
         source_topic: Buffer.from(TELEMETRY_TOPICS.AUTHORIZED),
         source_service: Buffer.from(config.source),
@@ -159,7 +164,10 @@ async function publishOversizedToDlq(
   await producer.send({
     messages: oversizedItems.map(({ item, reason }) => ({
       topic: TELEMETRY_TOPICS.DLQ,
-      value: Buffer.from(toBinary(SignedEnvelopeSchema, item.signedEnvelope)),
+      // Forward the original authorized-envelope bytes (not just the inner
+      // SignedEnvelope) so consumers of telemetry.dlq.v1 can decode this the
+      // same way as any other DLQ record and recover its event/trace metadata.
+      value: Buffer.from(item.raw),
       headers: {
         source_topic: Buffer.from(TELEMETRY_TOPICS.AUTHORIZED),
         source_service: Buffer.from(config.source),
@@ -234,7 +242,18 @@ async function produceBatch(
       metrics.batchesSplit += 1;
     }
 
-    for (const fittedBatch of fitted) {
+    // Build every sub-batch's Kafka message up front and publish them all in
+    // a single producer.send() call. Sending sub-batches one at a time would
+    // let an earlier split succeed while a later one fails; a subsequent
+    // retry of the whole (unsplit) batch would then republish the
+    // already-sent sub-batch. Since blockchain-anchor's idempotency check
+    // only compares against the *current* on-chain payload, such a
+    // duplicate can differ from what's on-chain (once a later split has
+    // since been anchored) and get resubmitted. Publishing as one batched
+    // request means the sub-batches for this attempt either all reach Kafka
+    // together or none do, so a retry never re-sends a subset that already
+    // landed.
+    const fittedWithIds = fitted.map((fittedBatch) => {
       const batchId = computeBatchId(fittedBatch.events);
 
       const payload = create(TelemetryBatchedPayloadSchema, {
@@ -256,15 +275,19 @@ async function produceBatch(
         payload: toBinary(TelemetryBatchedPayloadSchema, payload),
       });
 
-      await producer.send({
-        messages: [
-          {
-            topic: TELEMETRY_TOPICS.BATCHED,
-            value: Buffer.from(toBinary(EnvelopeSchema, resultEnvelope)),
-          },
-        ],
-      });
+      return { batchId, fittedBatch, resultEnvelope };
+    });
 
+    if (fittedWithIds.length > 0) {
+      await producer.send({
+        messages: fittedWithIds.map(({ resultEnvelope }) => ({
+          topic: TELEMETRY_TOPICS.BATCHED,
+          value: Buffer.from(toBinary(EnvelopeSchema, resultEnvelope)),
+        })),
+      });
+    }
+
+    for (const { batchId, fittedBatch } of fittedWithIds) {
       metrics.batchesProduced += 1;
       metrics.eventsBatched += fittedBatch.events.length;
 
@@ -543,6 +566,7 @@ export function createBatcherService(
                   partition: message.partition,
                   sensorId: payload.sensorId,
                   eventId: envelope.eventId,
+                  raw: new Uint8Array(message.value),
                 };
                 if (envelope.traceId !== undefined) {
                   batchItem.traceId = envelope.traceId;

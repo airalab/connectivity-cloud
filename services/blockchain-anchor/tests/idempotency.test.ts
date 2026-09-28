@@ -20,7 +20,7 @@ import {
 } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
 import type { ApiPromise } from '@polkadot/api';
-import type { Consumer } from '@platformatic/kafka';
+import type { Consumer, Producer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
 import { createBlockchainAnchorService } from '../src/index.js';
 import type { BlockchainAnchorConfig } from '../src/config.js';
@@ -36,8 +36,29 @@ function testConfig(
     nodeId: 0,
     healthPort: 3051,
     maxPayloadBytes: 8192,
+    source: 'blockchain-anchor',
     ...overrides,
   };
+}
+
+function createFakeProducer(
+  sent: { topic: string; value: Buffer; headers?: Record<string, Buffer> }[]
+): Producer {
+  const fake = {
+    async send({
+      messages,
+    }: {
+      messages: {
+        topic: string;
+        value: Buffer;
+        headers?: Record<string, Buffer>;
+      }[];
+    }) {
+      sent.push(...messages);
+    },
+    async close() {},
+  };
+  return fake as unknown as Producer;
 }
 
 interface FakeMessage {
@@ -267,7 +288,7 @@ describe('blockchain-anchor idempotency', () => {
     expect(metrics.skippedDuplicate).toBe(0);
   });
 
-  it('rejects a payload larger than maxPayloadBytes without submitting or splitting it', async () => {
+  it('rejects a payload larger than maxPayloadBytes without submitting or splitting it, forwarding it to the DLQ', async () => {
     const oversizedPayload = Buffer.alloc(200, 9);
 
     const messages = [
@@ -282,11 +303,18 @@ describe('blockchain-anchor idempotency', () => {
 
     const { consumer, commits } = createFakeConsumer(messages);
     const { api, setPayloadCalls } = createFakeApi();
+    const sent: {
+      topic: string;
+      value: Buffer;
+      headers?: Record<string, Buffer>;
+    }[] = [];
+    const producer = createFakeProducer(sent);
 
     const service = createBlockchainAnchorService(
       testConfig({ maxPayloadBytes: 100 }),
       {
         createConsumer: () => consumer,
+        createProducer: () => producer,
         createApi: () => Promise.resolve(api),
         createHealthServer: () =>
           ({
@@ -303,6 +331,14 @@ describe('blockchain-anchor idempotency', () => {
 
     expect(setPayloadCalls).toHaveLength(0);
     expect(commits).toEqual([{ partition: 0, offset: 1n }]);
+
+    // The original record is forwarded to the DLQ, not silently dropped.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.topic).toBe(TELEMETRY_TOPICS.DLQ);
+    expect(sent[0]?.value).toEqual(messages[0]?.value);
+    expect(sent[0]?.headers?.reason?.toString()).toBe(
+      'ANCHOR_PAYLOAD_TOO_LARGE'
+    );
 
     const metrics = service.getMetrics();
     expect(metrics.rejectedOversized).toBe(1);
