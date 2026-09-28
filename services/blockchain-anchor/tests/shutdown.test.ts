@@ -36,6 +36,7 @@ function testConfig(
     nodeId: 0,
     healthPort: 3052,
     maxPayloadBytes: 8192,
+    source: 'blockchain-anchor',
     ...overrides,
   };
 }
