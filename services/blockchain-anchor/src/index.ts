@@ -23,6 +23,7 @@ import {
 import { fromBinary, type MessageShape } from '@bufbuild/protobuf';
 import { Consumer, Producer } from '@platformatic/kafka';
 import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
+import { blake2AsU8a } from '@polkadot/util-crypto';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import {
@@ -64,18 +65,21 @@ export interface BlockchainAnchorDeps {
 interface OptionBytesCodec {
   readonly isSome?: boolean;
   readonly isEmpty?: boolean;
-  unwrap?: () => { toU8a: () => Uint8Array };
+  unwrap?: () => { toU8a: (isBare?: boolean) => Uint8Array };
 }
 
 /**
  * Read the payload currently anchored on-chain for a CPS node, if any.
  *
- * This is the authoritative idempotency check: rather than relying solely on
- * a local/Redis marker (which can't observe whether an extrinsic actually
+ * This is the authoritative idempotency check: rather than relying on local
+ * process state (which can't observe whether an extrinsic actually
  * finalized before a crash), we ask the chain what payload is currently set
- * for the node and compare it byte-for-byte against the payload we are about
+ * for the node and compare its content hash against the batch we are about
  * to submit. If they already match, the anchor operation is a no-op and is
- * skipped.
+ * skipped. The Kafka offset for `telemetry.batched.v1` is only committed
+ * once this check (and, if needed, the extrinsic) has completed, so an
+ * uncommitted offset itself durably marks a batch as "not yet confirmed
+ * anchored" — no separate persisted queue is required.
  */
 async function getAnchoredPayload(
   api: ApiPromise,
@@ -94,7 +98,11 @@ async function getAnchoredPayload(
       return null;
     }
 
-    return raw.unwrap().toU8a();
+    // `toU8a()` defaults to including the SCALE compact-length prefix used
+    // to encode `BoundedVec<u8>`, but `payload.payload` is just the bare XZ
+    // bytes. Pass `true` to strip the length prefix so the comparison is
+    // byte-for-byte against the same shape we submit.
+    return raw.unwrap().toU8a(true);
   } catch (error) {
     logWarn('failed to read on-chain payload for idempotency check', {
       nodeId,
@@ -102,6 +110,24 @@ async function getAnchoredPayload(
     });
     return null;
   }
+}
+
+/**
+ * Compare a batch's content hash (`payload_hash`, computed by the batcher as
+ * `blake2b-256` of the compressed payload) against the same hash computed
+ * over the payload currently anchored on-chain.
+ *
+ * Comparing hashes rather than raw bytes is cheaper and, more importantly,
+ * keys the comparison on the same content-addressed identity the batcher
+ * assigns to the batch, rather than depending on decoding the exact codec
+ * shape returned by the chain.
+ */
+function anchoredPayloadMatches(
+  anchoredPayload: Uint8Array,
+  expectedPayloadHash: Uint8Array
+): boolean {
+  const anchoredHash = blake2AsU8a(anchoredPayload, 256);
+  return bytesEqual(anchoredHash, expectedPayloadHash);
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -470,8 +496,8 @@ export function createBlockchainAnchorService(
                 // extrinsic. This covers the crash window between
                 // extrinsic finalization and Kafka offset commit - on
                 // redelivery the on-chain state already reflects the
-                // anchor, so we skip re-submission instead of creating a
-                // duplicate logical anchor operation.
+                // anchor (same content hash), so we skip re-submission
+                // instead of creating a duplicate logical anchor operation.
                 const anchoredPayload = await getAnchoredPayload(
                   api!,
                   config.nodeId
@@ -479,7 +505,7 @@ export function createBlockchainAnchorService(
 
                 if (
                   anchoredPayload !== null &&
-                  bytesEqual(anchoredPayload, payload.payload)
+                  anchoredPayloadMatches(anchoredPayload, payload.payloadHash)
                 ) {
                   metrics.skippedDuplicate += 1;
 

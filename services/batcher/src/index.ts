@@ -243,16 +243,13 @@ async function produceBatch(
     }
 
     // Build every sub-batch's Kafka message up front and publish them all in
-    // a single producer.send() call. Sending sub-batches one at a time would
-    // let an earlier split succeed while a later one fails; a subsequent
-    // retry of the whole (unsplit) batch would then republish the
-    // already-sent sub-batch. Since blockchain-anchor's idempotency check
-    // only compares against the *current* on-chain payload, such a
-    // duplicate can differ from what's on-chain (once a later split has
-    // since been anchored) and get resubmitted. Publishing as one batched
-    // request means the sub-batches for this attempt either all reach Kafka
-    // together or none do, so a retry never re-sends a subset that already
-    // landed.
+    // a single producer.send() call. This isn't a strict all-or-nothing
+    // guarantee across partitions/brokers, but it doesn't need to be:
+    // blockchain-anchor's idempotency check compares each batch's
+    // content-addressed `payload_hash` against the hash of whatever is
+    // currently anchored on-chain, so re-publishing a sub-batch that already
+    // landed (e.g. after a retry of this whole call) is a harmless no-op
+    // rather than a duplicate anchor.
     const fittedWithIds = fitted.map((fittedBatch) => {
       const batchId = computeBatchId(fittedBatch.events);
 

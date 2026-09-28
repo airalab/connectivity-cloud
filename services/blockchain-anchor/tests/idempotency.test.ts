@@ -19,6 +19,7 @@ import {
   EnvelopeSchema,
 } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
+import { blake2AsU8a } from '@polkadot/util-crypto';
 import type { ApiPromise } from '@polkadot/api';
 import type { Consumer, Producer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
@@ -82,7 +83,9 @@ function createBatchedMessage(
     sensorIds: [Buffer.alloc(32, 1)],
     uncompressedSize: payload.length * 2,
     compressedSize: payload.length,
-    payloadHash: Buffer.alloc(32, 3),
+    // Content-addressed identity of `payload`, matching how the real
+    // batcher derives `payload_hash` (blake2b-256 of the compressed bytes).
+    payloadHash: blake2AsU8a(payload, 256),
   });
 
   const envelope = create(EnvelopeSchema, {
