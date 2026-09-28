@@ -50,7 +50,6 @@ describe('core', () => {
     expect(TELEMETRY_TOPICS.AUTHORIZED).toBe('telemetry.authorized.v1');
     expect(TELEMETRY_TOPICS.REJECTED).toBe('telemetry.rejected.v1');
     expect(TELEMETRY_TOPICS.BATCHED).toBe('telemetry.batched.v1');
-    expect(TELEMETRY_TOPICS.IPFS_PUBLISHED).toBe('ipfs.published.v1');
     expect(TELEMETRY_TOPICS.DLQ).toBe('telemetry.dlq.v1');
     expect(Object.isFrozen(TELEMETRY_TOPICS)).toBe(true);
   });

@@ -15,15 +15,14 @@
  */
 import {
   TELEMETRY_TOPICS,
-  TelemetryIpfsPublishedPayloadSchema,
-  TelemetryIpfsPublishedPayload_Compression,
+  TelemetryBatchedPayloadSchema,
   EnvelopeSchema,
 } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
+import { blake2AsU8a } from '@polkadot/util-crypto';
 import type { ApiPromise } from '@polkadot/api';
-import type { Consumer } from '@platformatic/kafka';
+import type { Consumer, Producer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
-import { CID } from 'multiformats/cid';
 import { createBlockchainAnchorService } from '../src/index.js';
 import type { BlockchainAnchorConfig } from '../src/config.js';
 
@@ -37,8 +36,30 @@ function testConfig(
     suri: '//Alice',
     nodeId: 0,
     healthPort: 3051,
+    maxPayloadBytes: 8192,
+    source: 'blockchain-anchor',
     ...overrides,
   };
+}
+
+function createFakeProducer(
+  sent: { topic: string; value: Buffer; headers?: Record<string, Buffer> }[]
+): Producer {
+  const fake = {
+    async send({
+      messages,
+    }: {
+      messages: {
+        topic: string;
+        value: Buffer;
+        headers?: Record<string, Buffer>;
+      }[];
+    }) {
+      sent.push(...messages);
+    },
+    async close() {},
+  };
+  return fake as unknown as Producer;
 }
 
 interface FakeMessage {
@@ -48,29 +69,36 @@ interface FakeMessage {
   value: Buffer;
 }
 
-function createIpfsPublishedMessage(
+function createBatchedMessage(
   eventId: string,
-  cid: CID,
+  batchId: string,
+  payload: Uint8Array,
   partition: number,
   offset: bigint
 ): FakeMessage {
-  const payload = create(TelemetryIpfsPublishedPayloadSchema, {
-    cid: Buffer.from(cid.bytes),
+  const batchedPayload = create(TelemetryBatchedPayloadSchema, {
+    batchId,
+    payload,
     eventCount: 5,
-    compression: TelemetryIpfsPublishedPayload_Compression.NONE,
+    sensorIds: [Buffer.alloc(32, 1)],
+    uncompressedSize: payload.length * 2,
+    compressedSize: payload.length,
+    // Content-addressed identity of `payload`, matching how the real
+    // batcher derives `payload_hash` (blake2b-256 of the compressed bytes).
+    payloadHash: blake2AsU8a(payload, 256),
   });
 
   const envelope = create(EnvelopeSchema, {
     eventId,
-    eventType: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+    eventType: TELEMETRY_TOPICS.BATCHED,
     eventVersion: '1.0.0',
     occurredAt: '2026-01-01T00:00:00Z',
-    source: 'ipfs-publisher',
-    payload: toBinary(TelemetryIpfsPublishedPayloadSchema, payload),
+    source: 'batcher',
+    payload: toBinary(TelemetryBatchedPayloadSchema, batchedPayload),
   });
 
   return {
-    topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+    topic: TELEMETRY_TOPICS.BATCHED,
     partition,
     offset,
     value: Buffer.from(toBinary(EnvelopeSchema, envelope)),
@@ -118,14 +146,14 @@ function createFakeConsumer(messages: FakeMessage[]): {
 }
 
 /**
- * A fake ApiPromise whose `cps.payload` storage mirrors the last CID
+ * A fake ApiPromise whose `cps.payload` storage mirrors the last payload
  * submitted via `cps.setPayload`, simulating authoritative on-chain state.
  */
 function createFakeApi(): {
   api: ApiPromise;
-  setPayloadCalls: { nodeId: number; cid: number[] }[];
+  setPayloadCalls: { nodeId: number; payload: number[] }[];
 } {
-  const setPayloadCalls: { nodeId: number; cid: number[] }[] = [];
+  const setPayloadCalls: { nodeId: number; payload: number[] }[] = [];
   let anchored: Uint8Array | null = null;
 
   const api = {
@@ -147,8 +175,8 @@ function createFakeApi(): {
     },
     tx: {
       cps: {
-        setPayload(nodeId: number, cid: number[]) {
-          setPayloadCalls.push({ nodeId, cid });
+        setPayload(nodeId: number, payload: number[]) {
+          setPayloadCalls.push({ nodeId, payload });
           return {
             signAndSend(
               _account: unknown,
@@ -166,7 +194,7 @@ function createFakeApi(): {
                   isError: false,
                   events: [],
                 });
-                anchored = new Uint8Array(cid);
+                anchored = new Uint8Array(payload);
               });
               return Promise.resolve(() => {});
             },
@@ -181,15 +209,15 @@ function createFakeApi(): {
   return { api, setPayloadCalls };
 }
 
-describe('blockchain-anchor idempotency (issue #27)', () => {
-  it('does not resubmit a duplicate Kafka delivery once the CID is anchored on-chain', async () => {
-    const cid = CID.parse('QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG');
+describe('blockchain-anchor idempotency', () => {
+  it('does not resubmit a duplicate Kafka delivery once the batch is anchored on-chain', async () => {
+    const payload = Buffer.from('compressed-batch-bytes-1');
 
-    // Same event delivered twice (e.g. after a crash before the Kafka
-    // commit landed): both messages carry the same CID.
+    // Same batch delivered twice (e.g. after a crash before the Kafka
+    // commit landed): both messages carry the same batch_id and payload.
     const messages = [
-      createIpfsPublishedMessage('evt-1', cid, 0, 0n),
-      createIpfsPublishedMessage('evt-1', cid, 0, 1n),
+      createBatchedMessage('evt-1', 'batch-1', payload, 0, 0n),
+      createBatchedMessage('evt-1', 'batch-1', payload, 0, 1n),
     ];
 
     const { consumer, commits } = createFakeConsumer(messages);
@@ -229,15 +257,13 @@ describe('blockchain-anchor idempotency (issue #27)', () => {
     ]);
   });
 
-  it('anchors distinct CIDs independently without treating them as duplicates', async () => {
-    const cidA = CID.parse('QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG');
-    const cidB = CID.parse(
-      'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi'
-    );
+  it('anchors distinct batches independently without treating them as duplicates', async () => {
+    const payloadA = Buffer.from('compressed-batch-bytes-a');
+    const payloadB = Buffer.from('compressed-batch-bytes-b');
 
     const messages = [
-      createIpfsPublishedMessage('evt-a', cidA, 0, 0n),
-      createIpfsPublishedMessage('evt-b', cidB, 0, 1n),
+      createBatchedMessage('evt-a', 'batch-a', payloadA, 0, 0n),
+      createBatchedMessage('evt-b', 'batch-b', payloadB, 0, 1n),
     ];
 
     const { consumer } = createFakeConsumer(messages);
@@ -263,5 +289,62 @@ describe('blockchain-anchor idempotency (issue #27)', () => {
     const metrics = service.getMetrics();
     expect(metrics.anchored).toBe(2);
     expect(metrics.skippedDuplicate).toBe(0);
+  });
+
+  it('rejects a payload larger than maxPayloadBytes without submitting or splitting it, forwarding it to the DLQ', async () => {
+    const oversizedPayload = Buffer.alloc(200, 9);
+
+    const messages = [
+      createBatchedMessage(
+        'evt-oversized',
+        'batch-oversized',
+        oversizedPayload,
+        0,
+        0n
+      ),
+    ];
+
+    const { consumer, commits } = createFakeConsumer(messages);
+    const { api, setPayloadCalls } = createFakeApi();
+    const sent: {
+      topic: string;
+      value: Buffer;
+      headers?: Record<string, Buffer>;
+    }[] = [];
+    const producer = createFakeProducer(sent);
+
+    const service = createBlockchainAnchorService(
+      testConfig({ maxPayloadBytes: 100 }),
+      {
+        createConsumer: () => consumer,
+        createProducer: () => producer,
+        createApi: () => Promise.resolve(api),
+        createHealthServer: () =>
+          ({
+            close(callback: (error?: Error) => void) {
+              callback();
+            },
+          }) as unknown as import('node:http').Server,
+      }
+    );
+
+    await service.start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await service.stop();
+
+    expect(setPayloadCalls).toHaveLength(0);
+    expect(commits).toEqual([{ partition: 0, offset: 1n }]);
+
+    // The original record is forwarded to the DLQ, not silently dropped.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.topic).toBe(TELEMETRY_TOPICS.DLQ);
+    expect(sent[0]?.value).toEqual(messages[0]?.value);
+    expect(sent[0]?.headers?.reason?.toString()).toBe(
+      'ANCHOR_PAYLOAD_TOO_LARGE'
+    );
+
+    const metrics = service.getMetrics();
+    expect(metrics.rejectedOversized).toBe(1);
+    expect(metrics.anchored).toBe(0);
   });
 });

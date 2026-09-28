@@ -23,36 +23,32 @@ message TelemetryRejectedPayload {
   string reason_message = 3;
 }
 
-// TelemetryBatchedPayload carries a batch of authorized telemetry ready for
-// publication. It is emitted by the batcher and consumed by the ipfs-publisher.
+// TelemetryBatchedPayload carries a chain-ready batch of authorized telemetry.
+// It is emitted by the batcher and consumed directly by blockchain-anchor.
+// `payload` is the exact byte sequence passed to CPS.set_payload: an XZ
+// compressed, serialized crypto.v1.SignedEnvelopeBatch with no additional
+// framing. Payload interpretation (schema/encoding/compression) is described
+// through CPS metadata, not through bytes embedded in the payload itself.
 message TelemetryBatchedPayload {
-  // Unique batch identifier
+  // Unique batch identifier (logical batch identity, used for deduplication)
   string batch_id = 1;
 
-  // Serialized crypto.v1.SignedEnvelopeBatch (uncompressed)
-  bytes signed_envelope_batch = 2;
+  // Chain-ready payload: XZ(serialized crypto.v1.SignedEnvelopeBatch).
+  // This is exactly the byte sequence passed to CPS.set_payload.
+  bytes payload = 2;
 
   // Number of events in the batch
   uint32 event_count = 3;
 
   // Sensor IDs present in the batch (observability)
   repeated bytes sensor_ids = 4;
-}
 
-// TelemetryIpfsPublishedPayload is emitted when events are published to IPFS.
-message TelemetryIpfsPublishedPayload {
-  enum Compression {
-    // No compression
-    COMPRESSION_NONE = 0;
-    // XZ compression algorithm
-    COMPRESSION_XZ = 1;
-  }
-  // IPFS Content ID
-  bytes cid = 1;
-  
-  // Number of events in this batch
-  uint32 event_count = 2;
+  // Size of the serialized SignedEnvelopeBatch before compression (observability)
+  uint32 uncompressed_size = 5;
 
-  // If specified then compression applied to batch 
-  Compression compression = 3;
+  // Size of `payload` in bytes; must always be <= ANCHOR_MAX_PAYLOAD_BYTES
+  uint32 compressed_size = 6;
+
+  // blake2_256 hash of `payload`, useful for diagnostics/idempotency checks
+  bytes payload_hash = 7;
 }

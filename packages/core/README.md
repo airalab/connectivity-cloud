@@ -50,7 +50,7 @@ import {
   EnvelopeSchema,
   TelemetryAuthorizedPayloadSchema,
   TelemetryRejectedPayloadSchema,
-  TelemetryIpfsPublishedPayloadSchema,
+  TelemetryBatchedPayloadSchema,
   TelemetryPubsubResultPayloadSchema,
   TelemetryBlockchainResultPayloadSchema,
 } from '@scp/core';

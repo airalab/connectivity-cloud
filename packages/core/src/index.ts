@@ -19,6 +19,7 @@ export * from './rejection-codes.js';
 export * from './sensor-auth.js';
 export * from './topics.js';
 export * from './shutdown.js';
+export * from './anchor.js';
 
 // Re-export generated protobuf schemas
 export * from './generated/connectivity/v1/envelope_pb.js';

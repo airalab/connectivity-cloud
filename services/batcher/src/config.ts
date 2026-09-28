@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES } from '@scp/core';
+
 export interface BatcherConfig {
   kafkaBrokers: string[];
   consumerGroupId: string;
@@ -20,6 +22,8 @@ export interface BatcherConfig {
   healthPort: number;
   batchSize: number;
   batchTimeoutMs: number;
+  /** Maximum size, in bytes, of a chain-ready compressed payload. */
+  maxPayloadBytes: number;
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -40,5 +44,9 @@ export function loadBatcherConfig(
     healthPort: parsePositiveInt(env.BATCHER_HEALTH_PORT, 3041),
     batchSize: parsePositiveInt(env.BATCHER_BATCH_SIZE, 10),
     batchTimeoutMs: parsePositiveInt(env.BATCHER_BATCH_TIMEOUT_MS, 30000),
+    maxPayloadBytes: parsePositiveInt(
+      env.ANCHOR_MAX_PAYLOAD_BYTES,
+      DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES
+    ),
   };
 }

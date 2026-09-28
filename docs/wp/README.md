@@ -11,7 +11,7 @@ Each WP takes a scaffold/stub service to a working, tested implementation.
 ## Pipeline
 
 ```text
-Sensor -> Endpoint -> Kafka -> {PubSub Broadcaster, IPFS Publisher} -> Kafka -> Blockchain Anchor
+Sensor -> Endpoint -> Kafka -> {PubSub Broadcaster, Batcher -> Blockchain Anchor}
                           ^
 Robonomics chain -> Registry Sync -> Redis projection
 ```
@@ -25,8 +25,8 @@ Robonomics chain -> Registry Sync -> Redis projection
 | [WP-02](./wp-02-endpoint.md) | `endpoint` (`POST /v1/telemetry` ingress) | WP-00, WP-01 | Implemented (pending formal DoD sign-off) |
 | [WP-03](./wp-03-pubsub-broadcaster.md) | `pubsub-broadcaster` (GossipSub fan-out) | WP-00, WP-02 | Implemented |
 | WP-03A | `heartbeat-tracker` (trusted-event liveness & uptime observability) | WP-00, WP-02 | Implemented |
-| [WP-04](./wp-04-ipfs-publisher.md) | `ipfs-publisher` (batch + IPFS CID) | WP-00, WP-02 | Not started |
-| [WP-05](./wp-05-blockchain-anchor.md) | `blockchain-anchor` (CID-only anchoring) | WP-00, WP-04 | Not started |
+| [WP-04](./wp-04-ipfs-publisher.md) | `@scp/batcher` (batch, XZ-compress, size-fit) | WP-00, WP-02 | Implemented (superseded `ipfs-publisher`, see note in doc) |
+| [WP-05](./wp-05-blockchain-anchor.md) | `blockchain-anchor` (anchors compressed batch payloads via `cps.setPayload`) | WP-00, WP-04 | Implemented |
 
 ## Recommended sequencing
 
@@ -34,7 +34,7 @@ Robonomics chain -> Registry Sync -> Redis projection
 2. **WP-01** — the endpoint depends on the registry read path.
 3. **WP-02** — enables end-to-end producing onto Kafka.
 4. **WP-03 / WP-04** in parallel — both consume `telemetry.authorized.v1`.
-5. **WP-05** last — consumes `telemetry.ipfs.result.v1` from WP-04.
+5. **WP-05** last — consumes `telemetry.batched.v1` from WP-04.
 
 ## Definition of done (applies to every WP)
 

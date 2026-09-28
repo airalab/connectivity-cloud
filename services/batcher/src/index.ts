@@ -25,7 +25,6 @@ import {
 import { fromBinary, toBinary, create } from '@bufbuild/protobuf';
 import {
   SignedEnvelopeSchema,
-  SignedEnvelopeBatchSchema,
   type SignedEnvelope,
 } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { Consumer, Producer } from '@platformatic/kafka';
@@ -34,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { loadBatcherConfig, type BatcherConfig } from './config.js';
 import { createBatchFlusher } from './batch-flusher.js';
+import { fitBatch } from './payload-builder.js';
 import { logInfo, logWarn, logDebug, logError } from './logger.js';
 
 interface BatcherMetrics {
@@ -41,6 +41,10 @@ interface BatcherMetrics {
   batchesProduced: number;
   eventsBatched: number;
   produceFailure: number;
+  /** Number of times a candidate batch had to be split to fit the payload limit. */
+  batchesSplit: number;
+  /** Number of single events that could not fit even on their own (permanent error). */
+  oversizedEvents: number;
 }
 
 export interface BatcherService {
@@ -75,13 +79,18 @@ interface BatchItem {
   eventId?: string;
   /** Reason the envelope failed to parse; set only for poison items. */
   parseError?: string;
-  /** Original raw bytes; set only for poison items, for DLQ forwarding. */
-  raw?: Uint8Array;
+  /**
+   * Original raw bytes of the source `telemetry.authorized.v1` Kafka record
+   * (the serialized `Envelope`). Set for every item so it can be forwarded
+   * verbatim to the DLQ, whether the record is a poison (unparseable) item
+   * or a valid item that later turns out to be oversized.
+   */
+  raw: Uint8Array;
 }
 
 /** A batch item that parsed successfully and carries a valid envelope. */
 type ValidBatchItem = BatchItem &
-  Required<Pick<BatchItem, 'signedEnvelope' | 'sensorId' | 'eventId'>>;
+  Required<Pick<BatchItem, 'signedEnvelope' | 'sensorId' | 'eventId' | 'raw'>>;
 
 function isValidItem(item: BatchItem): item is ValidBatchItem {
   return item.parseError === undefined;
@@ -90,7 +99,7 @@ function isValidItem(item: BatchItem): item is ValidBatchItem {
 /**
  * Derive a stable batch ID from the batch's source offsets so retries of the
  * same detached batch (e.g. after a failed offset commit) reuse the same ID.
- * This lets downstream consumers (e.g. ipfs-publisher) deduplicate by
+ * This lets downstream consumers (e.g. blockchain-anchor) deduplicate by
  * `batch_id` even when a produce attempt is retried.
  */
 function computeBatchId(batch: readonly BatchItem[]): string {
@@ -117,7 +126,7 @@ async function publishPoisonToDlq(
   await producer.send({
     messages: poisonItems.map((item) => ({
       topic: TELEMETRY_TOPICS.DLQ,
-      value: Buffer.from(item.raw ?? new Uint8Array()),
+      value: Buffer.from(item.raw),
       headers: {
         source_topic: Buffer.from(TELEMETRY_TOPICS.AUTHORIZED),
         source_service: Buffer.from(config.source),
@@ -135,8 +144,54 @@ async function publishPoisonToDlq(
 }
 
 /**
- * Serialize a batch of authorized telemetry into a `telemetry.batched.v1`
- * envelope and produce it to Kafka.
+ * Publish events whose serialized + XZ compressed size exceeds
+ * `ANCHOR_MAX_PAYLOAD_BYTES` even on their own, to the DLQ topic. This is a
+ * permanent validation error (`ANCHOR_PAYLOAD_TOO_LARGE`), not a transient
+ * blockchain/produce failure, so it must not be retried indefinitely.
+ */
+async function publishOversizedToDlq(
+  oversizedItems: readonly {
+    item: ValidBatchItem;
+    reason: string;
+  }[],
+  producer: Producer,
+  config: BatcherConfig
+): Promise<void> {
+  if (oversizedItems.length === 0) {
+    return;
+  }
+
+  await producer.send({
+    messages: oversizedItems.map(({ item, reason }) => ({
+      topic: TELEMETRY_TOPICS.DLQ,
+      // Forward the original authorized-envelope bytes (not just the inner
+      // SignedEnvelope) so consumers of telemetry.dlq.v1 can decode this the
+      // same way as any other DLQ record and recover its event/trace metadata.
+      value: Buffer.from(item.raw),
+      headers: {
+        source_topic: Buffer.from(TELEMETRY_TOPICS.AUTHORIZED),
+        source_service: Buffer.from(config.source),
+        source_partition: Buffer.from(String(item.partition)),
+        source_offset: Buffer.from(String(item.offset - 1n)),
+        reason: Buffer.from(reason),
+      },
+    })),
+  });
+
+  logWarn('oversized events routed to DLQ', {
+    count: oversizedItems.length,
+    dlq_topic: TELEMETRY_TOPICS.DLQ,
+  });
+}
+
+/**
+ * Serialize a batch of authorized telemetry into one or more
+ * `telemetry.batched.v1` envelopes and produce them to Kafka.
+ *
+ * The batch is serialized, XZ compressed, and (if the compressed result
+ * exceeds `config.maxPayloadBytes`) recursively split so that every emitted
+ * payload fits `CPS.set_payload`. Events that cannot fit even on their own
+ * are routed to the DLQ as a permanent `ANCHOR_PAYLOAD_TOO_LARGE` error.
  */
 async function produceBatch(
   batch: readonly ValidBatchItem[],
@@ -157,61 +212,93 @@ async function produceBatch(
     )
   );
 
-  const batchId = computeBatchId(batch);
-
-  logInfo('producing batch', {
-    batch_id: batchId,
+  logInfo('fitting batch to payload limit', {
     batch_size: batch.length,
+    max_payload_bytes: config.maxPayloadBytes,
     unique_sensors: uniqueSensorIds.length,
     sensor_ids: uniqueSensorIds,
     trace_ids: traceIds.length > 0 ? traceIds : undefined,
   });
 
   try {
-    const batchData = create(SignedEnvelopeBatchSchema, {
-      batch: batch.map((b) => b.signedEnvelope),
+    const { batches: fitted, oversized } = await fitBatch(
+      batch,
+      config.maxPayloadBytes
+    );
+
+    if (oversized.length > 0) {
+      metrics.oversizedEvents += oversized.length;
+      await publishOversizedToDlq(
+        oversized.map(({ event, error }) => ({
+          item: event,
+          reason: `ANCHOR_PAYLOAD_TOO_LARGE: ${error.message}`,
+        })),
+        producer,
+        config
+      );
+    }
+
+    if (fitted.length > 1) {
+      metrics.batchesSplit += 1;
+    }
+
+    // Build every sub-batch's Kafka message up front and publish them all in
+    // a single producer.send() call. This isn't a strict all-or-nothing
+    // guarantee across partitions/brokers, but it doesn't need to be:
+    // blockchain-anchor's idempotency check compares each batch's
+    // content-addressed `payload_hash` against the hash of whatever is
+    // currently anchored on-chain, so re-publishing a sub-batch that already
+    // landed (e.g. after a retry of this whole call) is a harmless no-op
+    // rather than a duplicate anchor.
+    const fittedWithIds = fitted.map((fittedBatch) => {
+      const batchId = computeBatchId(fittedBatch.events);
+
+      const payload = create(TelemetryBatchedPayloadSchema, {
+        batchId,
+        payload: fittedBatch.payload,
+        eventCount: fittedBatch.events.length,
+        sensorIds: fittedBatch.events.map((b) => b.sensorId),
+        uncompressedSize: fittedBatch.uncompressedSize,
+        compressedSize: fittedBatch.compressedSize,
+        payloadHash: fittedBatch.payloadHash,
+      });
+
+      const resultEnvelope = create(EnvelopeSchema, {
+        eventId: batchId,
+        eventType: TELEMETRY_TOPICS.BATCHED,
+        eventVersion: '1.0.0',
+        occurredAt: new Date().toISOString(),
+        source: config.source,
+        payload: toBinary(TelemetryBatchedPayloadSchema, payload),
+      });
+
+      return { batchId, fittedBatch, resultEnvelope };
     });
 
-    const payload = create(TelemetryBatchedPayloadSchema, {
-      batchId,
-      signedEnvelopeBatch: toBinary(SignedEnvelopeBatchSchema, batchData),
-      eventCount: batch.length,
-      sensorIds: batch.map((b) => b.sensorId),
-    });
-
-    const resultEnvelope = create(EnvelopeSchema, {
-      eventId: batchId,
-      eventType: TELEMETRY_TOPICS.BATCHED,
-      eventVersion: '1.0.0',
-      occurredAt: new Date().toISOString(),
-      source: config.source,
-      payload: toBinary(TelemetryBatchedPayloadSchema, payload),
-    });
-
-    await producer.send({
-      messages: [
-        {
+    if (fittedWithIds.length > 0) {
+      await producer.send({
+        messages: fittedWithIds.map(({ resultEnvelope }) => ({
           topic: TELEMETRY_TOPICS.BATCHED,
           value: Buffer.from(toBinary(EnvelopeSchema, resultEnvelope)),
-        },
-      ],
-    });
+        })),
+      });
+    }
 
-    metrics.batchesProduced += 1;
-    metrics.eventsBatched += batch.length;
+    for (const { batchId, fittedBatch } of fittedWithIds) {
+      metrics.batchesProduced += 1;
+      metrics.eventsBatched += fittedBatch.events.length;
 
-    logInfo('batch produced', {
-      batch_id: batchId,
-      event_count: batch.length,
-      unique_sensors: uniqueSensorIds.length,
-      sensor_ids: uniqueSensorIds,
-      trace_ids: traceIds.length > 0 ? traceIds : undefined,
-      result_topic: TELEMETRY_TOPICS.BATCHED,
-    });
+      logInfo('batch produced', {
+        batch_id: batchId,
+        event_count: fittedBatch.events.length,
+        uncompressed_size: fittedBatch.uncompressedSize,
+        compressed_size: fittedBatch.compressedSize,
+        result_topic: TELEMETRY_TOPICS.BATCHED,
+      });
+    }
   } catch (error) {
     metrics.produceFailure += 1;
     logError('batch produce failed', error, {
-      batch_id: batchId,
       batch_size: batch.length,
       unique_sensors: uniqueSensorIds.length,
       sensor_ids: uniqueSensorIds,
@@ -277,6 +364,8 @@ export function createBatcherService(
     batchesProduced: 0,
     eventsBatched: 0,
     produceFailure: 0,
+    batchesSplit: 0,
+    oversizedEvents: 0,
   };
 
   const getMetrics = (): BatcherMetrics => metrics;
@@ -474,6 +563,7 @@ export function createBatcherService(
                   partition: message.partition,
                   sensorId: payload.sensorId,
                   eventId: envelope.eventId,
+                  raw: new Uint8Array(message.value),
                 };
                 if (envelope.traceId !== undefined) {
                   batchItem.traceId = envelope.traceId;

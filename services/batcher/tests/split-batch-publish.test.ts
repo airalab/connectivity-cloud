@@ -16,27 +16,27 @@
 import {
   TELEMETRY_TOPICS,
   TelemetryAuthorizedPayloadSchema,
-  TelemetryBatchedPayloadSchema,
   EnvelopeSchema,
 } from '@scp/core';
 import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
-import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
+import { create, toBinary } from '@bufbuild/protobuf';
+import { randomBytes } from 'node:crypto';
 import type { Consumer, Producer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
 import { createBatcherService } from '../src/index.js';
 import type { BatcherConfig } from '../src/config.js';
+
+const MAX_PAYLOAD_BYTES = 2000;
 
 function testConfig(overrides: Partial<BatcherConfig> = {}): BatcherConfig {
   return {
     kafkaBrokers: ['localhost:9092'],
     consumerGroupId: 'batcher-v1',
     source: 'batcher',
-    healthPort: 3041,
-    batchSize: 10,
-    // Large timeout so the flush timer never fires during the test; the only
-    // flush should be the one triggered by graceful shutdown.
+    healthPort: 3043,
+    batchSize: 20,
     batchTimeoutMs: 60000,
-    maxPayloadBytes: 8192,
+    maxPayloadBytes: MAX_PAYLOAD_BYTES,
     ...overrides,
   };
 }
@@ -55,7 +55,9 @@ function createAuthorizedMessage(
   const signedEnvelope = create(SignedEnvelopeSchema, {
     sensorId: Buffer.alloc(32, 1),
     nonce: Buffer.alloc(16, 2),
-    message: Buffer.from(JSON.stringify({ temp: 25 })),
+    // High-entropy payload so XZ cannot meaningfully compress it, forcing the
+    // combined batch above the payload limit and requiring a split.
+    message: randomBytes(1000),
     signature: Buffer.alloc(64, 3),
   });
 
@@ -81,11 +83,6 @@ function createAuthorizedMessage(
   };
 }
 
-/**
- * A fake consumer that yields the given messages and then keeps the stream
- * open (as a live consumer would) until `close()` is called, so the pending
- * batch stays partially filled until shutdown.
- */
 function createFakeConsumer(messages: FakeMessage[]): {
   consumer: Consumer;
   commits: { partition: number; offset: bigint }[];
@@ -125,27 +122,22 @@ function createFakeConsumer(messages: FakeMessage[]): {
   return { consumer: fake as unknown as Consumer, commits };
 }
 
-function createFakeProducer(sent: Buffer[]): Producer {
-  const fake = {
-    async send({ messages }: { messages: { topic: string; value: Buffer }[] }) {
-      for (const m of messages) {
-        sent.push(m.value);
-      }
-    },
-    async close() {},
-  };
-  return fake as unknown as Producer;
-}
-
-describe('batcher graceful shutdown', () => {
-  it('flushes a partially filled batch and commits offsets on shutdown', async () => {
-    const messages = [
-      createAuthorizedMessage(0, 0n),
-      createAuthorizedMessage(0, 1n),
-    ];
+describe('batcher split-batch publishing', () => {
+  it('publishes all fitted sub-batches in a single producer.send call', async () => {
+    const messages = Array.from({ length: 20 }, (_, i) =>
+      createAuthorizedMessage(0, BigInt(i))
+    );
     const { consumer, commits } = createFakeConsumer(messages);
-    const sent: Buffer[] = [];
-    const producer = createFakeProducer(sent);
+
+    let sendCalls = 0;
+    let totalMessages = 0;
+    const producer = {
+      async send({ messages: sent }: { messages: unknown[] }) {
+        sendCalls += 1;
+        totalMessages += sent.length;
+      },
+      async close() {},
+    } as unknown as Producer;
 
     const service = createBatcherService(testConfig(), {
       createConsumer: () => consumer,
@@ -159,32 +151,20 @@ describe('batcher graceful shutdown', () => {
     });
 
     await service.start();
-    // Let the two messages be consumed and added to the pending batch.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Nothing should have been produced yet: batch (2) is below batchSize (10)
-    // and the flush timer has not fired.
-    expect(sent).toHaveLength(0);
-    expect(service.getMetrics().batchesProduced).toBe(0);
-
-    // Graceful shutdown must flush the pending batch.
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await service.stop();
 
-    expect(sent).toHaveLength(1);
-
     const metrics = service.getMetrics();
-    expect(metrics.consumed).toBe(2);
-    expect(metrics.batchesProduced).toBe(1);
-    expect(metrics.eventsBatched).toBe(2);
+    // The batch had to be split into more than one sub-batch to fit.
+    expect(metrics.batchesProduced).toBeGreaterThan(1);
 
-    // The produced envelope carries both events on the batched topic.
-    const envelope = fromBinary(EnvelopeSchema, new Uint8Array(sent[0]!));
-    expect(envelope.eventType).toBe(TELEMETRY_TOPICS.BATCHED);
-    const batched = fromBinary(TelemetryBatchedPayloadSchema, envelope.payload);
-    expect(batched.eventCount).toBe(2);
+    // All sub-batches for this attempt are published in a single Kafka
+    // request: sending them one at a time would let an earlier split
+    // succeed while a later one fails, and a retry of the whole batch would
+    // then republish the already-sent sub-batch.
+    expect(sendCalls).toBe(1);
+    expect(totalMessages).toBe(metrics.batchesProduced);
 
-    // Offsets are committed only after a successful produce, using the next
-    // offset (max consumed offset + 1) for the partition.
-    expect(commits).toEqual([{ partition: 0, offset: 2n }]);
+    expect(commits).toEqual([{ partition: 0, offset: 20n }]);
   });
 });

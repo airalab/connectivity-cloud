@@ -38,6 +38,8 @@ services:
       timeout: 5s
       retries: 5
 
+  # Used only as a libp2p GossipSub reserved peer for pubsub-broadcaster
+  # integration testing (no longer used for telemetry batch storage).
   ipfs:
     image: ipfs/kubo:v0.42.0
     ports:

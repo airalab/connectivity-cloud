@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { defineConfig } from 'tsdown';
 
-export default defineConfig({
-  entry: ['src/index.ts'],
-  format: ['esm'],
-  clean: true,
-  dts: true,
-});
+/**
+ * Default maximum size, in bytes, of a chain-ready payload passed to
+ * `CPS.set_payload`. This is the single source of truth for the 8 KiB CPS
+ * payload limit; services may override it via environment configuration but
+ * should fall back to this default rather than hard-coding the literal
+ * value themselves.
+ */
+export const DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES = 8192;

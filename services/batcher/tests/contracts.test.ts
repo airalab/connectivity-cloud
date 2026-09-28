@@ -24,6 +24,8 @@ import {
   SignedEnvelopeBatchSchema,
 } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
+import { xz } from '@napi-rs/lzma';
+import { blake2AsU8a } from '@polkadot/util-crypto';
 import { describe, expect, it } from 'vitest';
 
 describe('batcher contract compatibility', () => {
@@ -55,7 +57,7 @@ describe('batcher contract compatibility', () => {
     expect(Buffer.from(payloadParsed.sensorId)).toEqual(Buffer.alloc(32, 1));
   });
 
-  it('produces valid telemetry.batched.v1 envelope carrying a SignedEnvelopeBatch', () => {
+  it('produces valid telemetry.batched.v1 envelope carrying a chain-ready compressed payload', async () => {
     const signedEnvelope1 = create(SignedEnvelopeSchema, {
       sensorId: Buffer.alloc(32, 1),
       nonce: Buffer.alloc(16, 2),
@@ -72,12 +74,17 @@ describe('batcher contract compatibility', () => {
     const batch = create(SignedEnvelopeBatchSchema, {
       batch: [signedEnvelope1, signedEnvelope2],
     });
+    const uncompressed = toBinary(SignedEnvelopeBatchSchema, batch);
+    const compressed = await xz.compress(uncompressed);
 
     const batchedPayload = create(TelemetryBatchedPayloadSchema, {
       batchId: 'batch-1',
-      signedEnvelopeBatch: toBinary(SignedEnvelopeBatchSchema, batch),
+      payload: compressed,
       eventCount: 2,
       sensorIds: [Buffer.alloc(32, 1), Buffer.alloc(32, 4)],
+      uncompressedSize: uncompressed.length,
+      compressedSize: compressed.length,
+      payloadHash: blake2AsU8a(compressed, 256),
     });
 
     const envelope = create(EnvelopeSchema, {
@@ -103,12 +110,12 @@ describe('batcher contract compatibility', () => {
     expect(payloadParsed.batchId).toBe('batch-1');
     expect(payloadParsed.eventCount).toBe(2);
     expect(payloadParsed.sensorIds).toHaveLength(2);
+    expect(payloadParsed.compressedSize).toBeLessThanOrEqual(8192);
 
-    // The carried SignedEnvelopeBatch round-trips intact.
-    const innerBatch = fromBinary(
-      SignedEnvelopeBatchSchema,
-      payloadParsed.signedEnvelopeBatch
-    );
+    // The carried payload is exactly XZ(serialized SignedEnvelopeBatch); it
+    // round-trips (decompress -> parse) intact with no extra framing.
+    const decompressed = await xz.decompress(payloadParsed.payload);
+    const innerBatch = fromBinary(SignedEnvelopeBatchSchema, decompressed);
     expect(innerBatch.batch).toHaveLength(2);
     expect(Buffer.from(innerBatch.batch[0]?.sensorId ?? [])).toEqual(
       Buffer.alloc(32, 1)

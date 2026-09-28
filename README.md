@@ -23,7 +23,7 @@ make all
 This will:
 1. Install dependencies with pnpm
 2. Build all packages and services
-3. Start infrastructure (Kafka, Redis, IPFS, Robonomics)
+3. Start infrastructure (Kafka, Redis, Robonomics)
 4. Initialize Kafka topics
 5. Start all services
 
@@ -36,9 +36,8 @@ services/registry-sync     # Robonomics blockchain→Redis projection sync servi
 services/whitelist         # Whitelist-based sensor authentication provider
 services/pubsub-broadcaster # Kafka→libp2p GossipSub bridge for real-time web UI
 services/heartbeat-tracker  # Observability: sensor liveness & uptime metrics
-services/batcher           # Kafka: batches authorized telemetry into telemetry.batched.v1
-services/ipfs-publisher    # Kafka→IPFS publisher (publishes batches, produces CIDs)
-services/blockchain-anchor # IPFS CID→Robonomics CPS pallet anchoring
+services/batcher           # Kafka: batches, compresses (XZ), and splits telemetry into telemetry.batched.v1
+services/blockchain-anchor # Anchors chain-ready compressed batches to the Robonomics CPS pallet
 tools/fake-sensor-cli      # Generate test telemetry with Ed25519 signatures
 ```
 
@@ -95,6 +94,5 @@ Use `REJECTION_CODES` from `@scp/core` to reference these codes in your code:
 - **whitelist**: Alternative authentication provider - maintains static sensor whitelist in Redis, bypassing blockchain dependency for simpler deployments.
 - **pubsub-broadcaster**: Consumes `telemetry.authorized.v1`, publishes to libp2p/GossipSub for real-time web UI, emits `telemetry.pubsub.result.v1`, routes exhausted failures to DLQ.
 - **heartbeat-tracker**: Observability-only consumer of `telemetry.authorized.v1`, tracks sensor liveness (`firstSeen`, `lastSeen`, `onlineSince`) in Redis, exposes `sensors_online` count and per-sensor/aggregate uptime metrics over configurable online window (default 30s). Does not emit result events or participate in retry/DLQ.
-- **batcher**: Consumes `telemetry.authorized.v1`, groups events into deterministic batches (by size, lag, and a bounded flush timer), and emits `telemetry.batched.v1`. Serializes flushes (single active flush per instance) and flushes pending batches on graceful shutdown.
-- **ipfs-publisher**: Consumes `telemetry.batched.v1`, publishes/pins each batch to IPFS (optionally XZ-compressed), deduplicates by `batch_id`, emits `ipfs.published.v1`.
-- **blockchain-anchor**: Consumes `ipfs.published.v1` and anchors CIDs to the Robonomics blockchain.
+- **batcher**: Consumes `telemetry.authorized.v1`, groups events into deterministic batches (by size, lag, and a bounded flush timer), XZ-compresses and splits each batch to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`. Serializes flushes (single active flush per instance) and flushes pending batches on graceful shutdown.
+- **blockchain-anchor**: Consumes `telemetry.batched.v1` and anchors the compressed payload bytes to the Robonomics blockchain via `cps.setPayload`, deduplicating by comparing against the current on-chain payload.

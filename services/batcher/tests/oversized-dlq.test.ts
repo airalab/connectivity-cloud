@@ -16,11 +16,10 @@
 import {
   TELEMETRY_TOPICS,
   TelemetryAuthorizedPayloadSchema,
-  TelemetryBatchedPayloadSchema,
   EnvelopeSchema,
 } from '@scp/core';
 import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
-import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
+import { create, toBinary } from '@bufbuild/protobuf';
 import type { Consumer, Producer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
 import { createBatcherService } from '../src/index.js';
@@ -31,10 +30,8 @@ function testConfig(overrides: Partial<BatcherConfig> = {}): BatcherConfig {
     kafkaBrokers: ['localhost:9092'],
     consumerGroupId: 'batcher-v1',
     source: 'batcher',
-    healthPort: 3041,
+    healthPort: 3042,
     batchSize: 10,
-    // Large timeout so the flush timer never fires during the test; the only
-    // flush should be the one triggered by graceful shutdown.
     batchTimeoutMs: 60000,
     maxPayloadBytes: 8192,
     ...overrides,
@@ -50,12 +47,13 @@ interface FakeMessage {
 
 function createAuthorizedMessage(
   partition: number,
-  offset: bigint
+  offset: bigint,
+  messageSize: number
 ): FakeMessage {
   const signedEnvelope = create(SignedEnvelopeSchema, {
     sensorId: Buffer.alloc(32, 1),
     nonce: Buffer.alloc(16, 2),
-    message: Buffer.from(JSON.stringify({ temp: 25 })),
+    message: Buffer.alloc(messageSize, 9),
     signature: Buffer.alloc(64, 3),
   });
 
@@ -81,11 +79,6 @@ function createAuthorizedMessage(
   };
 }
 
-/**
- * A fake consumer that yields the given messages and then keeps the stream
- * open (as a live consumer would) until `close()` is called, so the pending
- * batch stays partially filled until shutdown.
- */
 function createFakeConsumer(messages: FakeMessage[]): {
   consumer: Consumer;
   commits: { partition: number; offset: bigint }[];
@@ -125,66 +118,70 @@ function createFakeConsumer(messages: FakeMessage[]): {
   return { consumer: fake as unknown as Consumer, commits };
 }
 
-function createFakeProducer(sent: Buffer[]): Producer {
+function createFakeProducer(
+  sent: { topic: string; value: Buffer; headers?: Record<string, Buffer> }[]
+): Producer {
   const fake = {
-    async send({ messages }: { messages: { topic: string; value: Buffer }[] }) {
-      for (const m of messages) {
-        sent.push(m.value);
-      }
+    async send({
+      messages,
+    }: {
+      messages: {
+        topic: string;
+        value: Buffer;
+        headers?: Record<string, Buffer>;
+      }[];
+    }) {
+      sent.push(...messages);
     },
     async close() {},
   };
   return fake as unknown as Producer;
 }
 
-describe('batcher graceful shutdown', () => {
-  it('flushes a partially filled batch and commits offsets on shutdown', async () => {
-    const messages = [
-      createAuthorizedMessage(0, 0n),
-      createAuthorizedMessage(0, 1n),
-    ];
-    const { consumer, commits } = createFakeConsumer(messages);
-    const sent: Buffer[] = [];
+describe('batcher oversized-event DLQ forwarding', () => {
+  it('forwards the original authorized-envelope bytes for an oversized event', async () => {
+    // A single event whose serialized+compressed size exceeds the tiny
+    // maxPayloadBytes below, forcing it into the `oversized` path.
+    const message = createAuthorizedMessage(0, 0n, 5000);
+    const { consumer, commits } = createFakeConsumer([message]);
+    const sent: {
+      topic: string;
+      value: Buffer;
+      headers?: Record<string, Buffer>;
+    }[] = [];
     const producer = createFakeProducer(sent);
 
-    const service = createBatcherService(testConfig(), {
-      createConsumer: () => consumer,
-      createProducer: () => producer,
-      createHealthServer: () =>
-        ({
-          close(callback: (error?: Error) => void) {
-            callback();
-          },
-        }) as unknown as import('node:http').Server,
-    });
+    const service = createBatcherService(
+      testConfig({ maxPayloadBytes: 100, batchSize: 1 }),
+      {
+        createConsumer: () => consumer,
+        createProducer: () => producer,
+        createHealthServer: () =>
+          ({
+            close(callback: (error?: Error) => void) {
+              callback();
+            },
+          }) as unknown as import('node:http').Server,
+      }
+    );
 
     await service.start();
-    // Let the two messages be consumed and added to the pending batch.
     await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Nothing should have been produced yet: batch (2) is below batchSize (10)
-    // and the flush timer has not fired.
-    expect(sent).toHaveLength(0);
-    expect(service.getMetrics().batchesProduced).toBe(0);
-
-    // Graceful shutdown must flush the pending batch.
     await service.stop();
 
-    expect(sent).toHaveLength(1);
+    expect(commits).toEqual([{ partition: 0, offset: 1n }]);
+
+    const dlqRecords = sent.filter((m) => m.topic === TELEMETRY_TOPICS.DLQ);
+    expect(dlqRecords).toHaveLength(1);
+    // The DLQ record must be the original authorized Envelope bytes (decodable
+    // the same way as any other DLQ record), not just the inner SignedEnvelope.
+    expect(dlqRecords[0]?.value).toEqual(message.value);
+    expect(dlqRecords[0]?.headers?.reason?.toString()).toContain(
+      'ANCHOR_PAYLOAD_TOO_LARGE'
+    );
 
     const metrics = service.getMetrics();
-    expect(metrics.consumed).toBe(2);
-    expect(metrics.batchesProduced).toBe(1);
-    expect(metrics.eventsBatched).toBe(2);
-
-    // The produced envelope carries both events on the batched topic.
-    const envelope = fromBinary(EnvelopeSchema, new Uint8Array(sent[0]!));
-    expect(envelope.eventType).toBe(TELEMETRY_TOPICS.BATCHED);
-    const batched = fromBinary(TelemetryBatchedPayloadSchema, envelope.payload);
-    expect(batched.eventCount).toBe(2);
-
-    // Offsets are committed only after a successful produce, using the next
-    // offset (max consumed offset + 1) for the partition.
-    expect(commits).toEqual([{ partition: 0, offset: 2n }]);
+    expect(metrics.oversizedEvents).toBe(1);
+    expect(metrics.batchesProduced).toBe(0);
   });
 });

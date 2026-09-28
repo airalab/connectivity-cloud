@@ -116,7 +116,6 @@ jobs:
           (pnpm --filter @scp/registry-sync dev > logs/registry-sync.log 2>&1 & echo $! > logs/registry-sync.pid)
           (pnpm --filter @scp/endpoint dev > logs/endpoint.log 2>&1 & echo $! > logs/endpoint.pid)
           (PUBSUB_RESERVED_PEERS="${PUBSUB_RESERVED_PEERS}" pnpm --filter @scp/pubsub-broadcaster dev > logs/pubsub-broadcaster.log 2>&1 & echo $! > logs/pubsub-broadcaster.pid)
-          (pnpm --filter @scp/ipfs-publisher dev > logs/ipfs-publisher.log 2>&1 & echo $! > logs/ipfs-publisher.pid)
           (pnpm --filter @scp/blockchain-anchor dev > logs/blockchain-anchor.log 2>&1 & echo $! > logs/blockchain-anchor.pid)
 
       - name: Wait for service health endpoints
@@ -216,7 +215,7 @@ jobs:
           fi
 
           if grep -Eqi '(^|[^a-z])(error|exception|unhandledrejection|econnrefused|failed to start|failed to publish)([^a-z]|$)' \
-            logs/endpoint.log logs/registry-sync.log logs/pubsub-broadcaster.log logs/ipfs-publisher.log logs/blockchain-anchor.log; then
+            logs/endpoint.log logs/registry-sync.log logs/pubsub-broadcaster.log logs/blockchain-anchor.log; then
             echo 'Detected error markers in service logs' >&2
             exit 1
           fi

@@ -14,7 +14,7 @@ GossipSub node for real-time web UI updates.
   consumer group) whenever fewer than the configured minimum number of
   reserved peers are connected, and resumed once connectivity recovers
 
-This service forwards telemetry to real-time subscribers. Failures are acceptable since telemetry is also archived via `ipfs-publisher` and `blockchain-anchor` services.
+This service forwards telemetry to real-time subscribers. Failures are acceptable since telemetry is also durably anchored via the `batcher` and `blockchain-anchor` services.
 
 ## libp2p GossipSub
 
