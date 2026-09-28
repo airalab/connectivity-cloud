@@ -15,15 +15,13 @@
  */
 import {
   TELEMETRY_TOPICS,
-  TelemetryIpfsPublishedPayloadSchema,
-  TelemetryIpfsPublishedPayload_Compression,
+  TelemetryBatchedPayloadSchema,
   EnvelopeSchema,
 } from '@scp/core';
 import { create, toBinary } from '@bufbuild/protobuf';
 import type { ApiPromise } from '@polkadot/api';
 import type { Consumer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
-import { CID } from 'multiformats/cid';
 import { createBlockchainAnchorService } from '../src/index.js';
 import type { BlockchainAnchorConfig } from '../src/config.js';
 
@@ -37,6 +35,7 @@ function testConfig(
     suri: '//Alice',
     nodeId: 0,
     healthPort: 3052,
+    maxPayloadBytes: 8192,
     ...overrides,
   };
 }
@@ -48,29 +47,34 @@ interface FakeMessage {
   value: Buffer;
 }
 
-function createIpfsPublishedMessage(
+function createBatchedMessage(
   eventId: string,
-  cid: CID,
+  batchId: string,
+  payload: Uint8Array,
   partition: number,
   offset: bigint
 ): FakeMessage {
-  const payload = create(TelemetryIpfsPublishedPayloadSchema, {
-    cid: Buffer.from(cid.bytes),
+  const batchedPayload = create(TelemetryBatchedPayloadSchema, {
+    batchId,
+    payload,
     eventCount: 5,
-    compression: TelemetryIpfsPublishedPayload_Compression.NONE,
+    sensorIds: [Buffer.alloc(32, 1)],
+    uncompressedSize: payload.length * 2,
+    compressedSize: payload.length,
+    payloadHash: Buffer.alloc(32, 3),
   });
 
   const envelope = create(EnvelopeSchema, {
     eventId,
-    eventType: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+    eventType: TELEMETRY_TOPICS.BATCHED,
     eventVersion: '1.0.0',
     occurredAt: '2026-01-01T00:00:00Z',
-    source: 'ipfs-publisher',
-    payload: toBinary(TelemetryIpfsPublishedPayloadSchema, payload),
+    source: 'batcher',
+    payload: toBinary(TelemetryBatchedPayloadSchema, batchedPayload),
   });
 
   return {
-    topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+    topic: TELEMETRY_TOPICS.BATCHED,
     partition,
     offset,
     value: Buffer.from(toBinary(EnvelopeSchema, envelope)),
@@ -104,8 +108,8 @@ function createFakeConsumer(messages: FakeMessage[]): { consumer: Consumer } {
 
 describe('blockchain-anchor graceful shutdown (issue #32)', () => {
   it('does not disconnect the chain API until the in-flight extrinsic finishes', async () => {
-    const cid = CID.parse('QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG');
-    const messages = [createIpfsPublishedMessage('evt-1', cid, 0, 0n)];
+    const payload = Buffer.from('compressed-batch-bytes');
+    const messages = [createBatchedMessage('evt-1', 'batch-1', payload, 0, 0n)];
     const { consumer } = createFakeConsumer(messages);
 
     const events: string[] = [];

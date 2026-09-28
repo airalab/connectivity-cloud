@@ -23,21 +23,20 @@ Every telemetry event can be traced through the entire pipeline using `trace_id`
                          │                          │                          │
                          ▼                          ▼                          ▼
               ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
-              │ pubsub-broadcaster  │  │  ipfs-publisher     │  │  heartbeat-tracker  │
+              │ pubsub-broadcaster  │  │  batcher            │  │  heartbeat-tracker  │
               │  trace_id ✓         │  │  trace_id ✓         │  │  trace_id ✓         │
               │  sensor_id ✓        │  │  sensor_id ✓        │  │  sensor_id ✓        │
               └─────────────────────┘  └─────────────────────┘  └─────────────────────┘
                          │                          │
                          ▼                          ▼
               ┌─────────────────────┐  ┌─────────────────────┐
-              │  IPFS GossipSub     │  │  IPFS Storage       │
-              │  (real-time)        │  │  + CID              │
+              │  GossipSub          │  │  telemetry.batched  │
+              │  (real-time)        │  │  .v1 (compressed)   │
               └─────────────────────┘  └─────────────────────┘
                                                     │
                                                     ▼
                                        ┌─────────────────────┐
                                        │ Blockchain Anchor   │
-                                       │ (future)            │
                                        └─────────────────────┘
 ```
 
@@ -53,15 +52,15 @@ Every telemetry event can be traced through the entire pipeline using `trace_id`
 }
 ```
 
-### IPFS Publisher (Batch)
+### Batcher (Batch)
 ```json
 {
   "trace_ids": ["550e8400-...", "660f9511-..."],
   "sensor_ids": ["5GrwvaEF...", "5HGjWAe..."],
   "unique_sensors": 2,
   "batch_size": 10,
-  "cid": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
-  "msg": "batch published to IPFS"
+  "batch_id": "b7e2c1...",
+  "msg": "batch compressed and published"
 }
 ```
 
@@ -89,14 +88,15 @@ Every telemetry event can be traced through the entire pipeline using `trace_id`
 ```json
 {
   "event_id": "evt_789",
-  "cid": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+  "batch_id": "b7e2c1...",
+  "payload_size": 4096,
   "event_count": 10,
   "node_id": 0,
-  "msg": "anchoring IPFS CID to blockchain"
+  "msg": "anchoring batch to blockchain"
 }
 ```
 
-**Design Note**: `blockchain-anchor` operates on IPFS batches (identified by CID), not individual telemetry events. CID is the natural correlation key for tracing batches to blockchain. Individual sensor trace_ids are available via IPFS publisher logs (see correlation strategy below).
+**Design Note**: `blockchain-anchor` operates on compressed batches (identified by `batch_id`), not individual telemetry events. `batch_id` is the natural correlation key for tracing batches to blockchain. Individual sensor trace_ids are available via batcher logs (see correlation strategy below).
 
 ## Querying Logs
 
@@ -110,9 +110,9 @@ grep '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY' logs/*.log | jq
 grep '550e8400-e29b-41d4-a716-446655440000' logs/*.log | jq
 ```
 
-### Find which sensors are in a specific IPFS batch
+### Find which sensors are in a specific batch
 ```bash
-grep 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' logs/ipfs-publisher.log | jq '.sensor_ids'
+grep 'b7e2c1...' logs/batcher.log | jq '.sensor_ids'
 ```
 
 ### Trace from sensor to blockchain
@@ -121,12 +121,12 @@ grep 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' logs/ipfs-publisher.log | 
 grep '5GrwvaEF...' logs/endpoint.log | jq '.trace_id'
 # Returns: 550e8400-e29b-41d4-a716-446655440000
 
-# 2. Find batch containing that sensor in ipfs-publisher
-grep '550e8400-e29b-41d4-a716-446655440000' logs/ipfs-publisher.log | jq '.cid'
-# Returns: QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG
+# 2. Find batch containing that sensor in batcher logs
+grep '550e8400-e29b-41d4-a716-446655440000' logs/batcher.log | jq '.batch_id'
+# Returns: b7e2c1...
 
-# 3. Find blockchain anchoring of that CID
-grep 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' logs/blockchain-anchor.log | jq
+# 3. Find blockchain anchoring of that batch
+grep 'b7e2c1...' logs/blockchain-anchor.log | jq
 ```
 
 ## Trace ID Lifecycle
@@ -135,7 +135,7 @@ grep 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' logs/blockchain-anchor.log
 2. **Propagated**: Through Kafka envelope (`envelope.traceId`)
 3. **Extracted**: By each consumer service from envelope
 4. **Logged**: In all processing steps
-5. **Batched**: Multiple trace IDs logged together in IPFS publisher batches
+5. **Batched**: Multiple trace IDs logged together in batcher batches
 
 ## Sensor ID Format
 
@@ -145,8 +145,8 @@ grep 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' logs/blockchain-anchor.log
 
 ## Implementation Notes
 
-- Telemetry consumers (`pubsub-broadcaster`, `ipfs-publisher`, `heartbeat-tracker`) extract `trace_id` from `Envelope.traceId` field
-- **Batch-level tracing**: `blockchain-anchor` uses CID as the correlation key (cleaner separation of concerns)
+- Telemetry consumers (`pubsub-broadcaster`, `batcher`, `heartbeat-tracker`) extract `trace_id` from `Envelope.traceId` field
+- **Batch-level tracing**: `blockchain-anchor` uses `batch_id` as the correlation key (cleaner separation of concerns)
 - Batch operations log arrays of affected sensors and traces
 - Log level `debug` for per-message tracing, `info` for batch summaries
 - Structured logging via Pino for easy parsing/filtering
@@ -163,9 +163,9 @@ Use `trace_id` to track individual sensor telemetry through the pipeline.
 
 ### Batch-to-Blockchain Tracing
 ```
-sensor_id → trace_id → batch CID → blockchain transaction
+sensor_id → trace_id → batch_id → blockchain transaction
 ```
-Use CID as the correlation key:
+Use `batch_id` as the correlation key:
 1. Find sensor's `trace_id` in endpoint/consumer logs
-2. Find batch CID containing that `trace_id` in ipfs-publisher logs (includes full `sensor_ids` and `trace_ids` arrays)
-3. Find blockchain anchoring for that CID in blockchain-anchor logs
+2. Find `batch_id` containing that `trace_id` in batcher logs (includes full `sensor_ids` and `trace_ids` arrays)
+3. Find blockchain anchoring for that `batch_id` in blockchain-anchor logs

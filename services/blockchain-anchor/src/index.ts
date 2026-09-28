@@ -16,8 +16,8 @@
 import {
   TELEMETRY_TOPICS,
   EnvelopeSchema,
-  TelemetryIpfsPublishedPayloadSchema,
-  type TelemetryIpfsPublishedPayload,
+  TelemetryBatchedPayloadSchema,
+  type TelemetryBatchedPayload,
   installShutdownHandler,
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
@@ -25,7 +25,6 @@ import { Consumer } from '@platformatic/kafka';
 import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { CID } from 'multiformats/cid';
 import {
   loadBlockchainAnchorConfig,
   type BlockchainAnchorConfig,
@@ -37,6 +36,8 @@ interface BlockchainAnchorMetrics {
   anchored: number;
   skippedDuplicate: number;
   failed: number;
+  /** Payloads rejected because they exceed the defensive size invariant. */
+  rejectedOversized: number;
 }
 
 export interface BlockchainAnchorService {
@@ -66,18 +67,19 @@ interface OptionBytesCodec {
 }
 
 /**
- * Read the CID currently anchored on-chain for a CPS node, if any.
+ * Read the payload currently anchored on-chain for a CPS node, if any.
  *
  * This is the authoritative idempotency check: rather than relying solely on
  * a local/Redis marker (which can't observe whether an extrinsic actually
  * finalized before a crash), we ask the chain what payload is currently set
- * for the node and compare it against the CID we are about to submit. If
- * they already match, the anchor operation is a no-op and is skipped.
+ * for the node and compare it byte-for-byte against the payload we are about
+ * to submit. If they already match, the anchor operation is a no-op and is
+ * skipped.
  */
-async function getAnchoredCid(
+async function getAnchoredPayload(
   api: ApiPromise,
   nodeId: number
-): Promise<string | null> {
+): Promise<Uint8Array | null> {
   if (!api.query.cps?.payload) {
     return null;
   }
@@ -91,8 +93,7 @@ async function getAnchoredCid(
       return null;
     }
 
-    const bytes = raw.unwrap().toU8a();
-    return CID.decode(bytes).toString();
+    return raw.unwrap().toU8a();
   } catch (error) {
     logWarn('failed to read on-chain payload for idempotency check', {
       nodeId,
@@ -102,21 +103,34 @@ async function getAnchoredCid(
   }
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
- * Send CPS setPayload extrinsic to blockchain
+ * Send CPS setPayload extrinsic to blockchain.
+ *
+ * `payload` is submitted exactly as received from `telemetry.batched.v1` —
+ * this service must not reserialize, recompress, or otherwise change it.
  */
 async function sendSetPayloadExtrinsic(
   api: ApiPromise,
   keyring: Keyring,
   suri: string,
   nodeId: number,
-  cid: Uint8Array
+  payload: Uint8Array
 ): Promise<void> {
-  const cidString = CID.decode(cid).toString();
-
   logDebug('preparing set_payload extrinsic', {
     nodeId,
-    cid: cidString,
+    payload_size: payload.length,
   });
 
   const account = keyring.addFromUri(suri);
@@ -128,11 +142,11 @@ async function sendSetPayloadExtrinsic(
   if (!api.tx.cps?.setPayload) {
     throw new Error('cps.setPayload extrinsic not found');
   }
-  const extrinsic = api.tx.cps.setPayload(nodeId, Array.from(cid));
+  const extrinsic = api.tx.cps.setPayload(nodeId, Array.from(payload));
 
   logInfo('submitting set_payload extrinsic', {
     nodeId,
-    cid: cidString,
+    payload_size: payload.length,
     from: account.address,
   });
 
@@ -151,7 +165,7 @@ async function sendSetPayloadExtrinsic(
           logInfo('extrinsic in block', {
             blockHash: result.status.asInBlock.toString(),
             nodeId,
-            cid: cidString,
+            payload_size: payload.length,
           });
         }
 
@@ -159,7 +173,7 @@ async function sendSetPayloadExtrinsic(
           logInfo('extrinsic finalized', {
             blockHash: result.status.asFinalized.toString(),
             nodeId,
-            cid: cidString,
+            payload_size: payload.length,
           });
 
           if (unsub) {
@@ -187,7 +201,7 @@ async function sendSetPayloadExtrinsic(
               new Error('ExtrinsicFailed'),
               {
                 nodeId,
-                cid: cidString,
+                payload_size: payload.length,
                 errorData: errorData?.toString(),
               }
             );
@@ -207,7 +221,7 @@ async function sendSetPayloadExtrinsic(
           const error = new Error('Transaction failed with status error');
           logError('extrinsic submission error', error, {
             nodeId,
-            cid: cidString,
+            payload_size: payload.length,
             status: result.status.type,
           });
           reject(error);
@@ -219,7 +233,7 @@ async function sendSetPayloadExtrinsic(
       .catch((error) => {
         logError('failed to submit extrinsic', error, {
           nodeId,
-          cid: cidString,
+          payload_size: payload.length,
         });
         reject(error);
       });
@@ -253,6 +267,7 @@ export function createBlockchainAnchorService(
     anchored: 0,
     skippedDuplicate: 0,
     failed: 0,
+    rejectedOversized: 0,
   };
 
   const getMetrics = (): BlockchainAnchorMetrics => metrics;
@@ -293,7 +308,7 @@ export function createBlockchainAnchorService(
 
         // Start Kafka consumer
         const consumerStream = await consumer.consume({
-          topics: [TELEMETRY_TOPICS.IPFS_PUBLISHED],
+          topics: [TELEMETRY_TOPICS.BATCHED],
           autocommit: false,
         });
 
@@ -317,30 +332,58 @@ export function createBlockchainAnchorService(
                   new Uint8Array(message.value)
                 );
 
-                if (envelope.eventType !== TELEMETRY_TOPICS.IPFS_PUBLISHED) {
-                  logDebug('non-ipfs-published envelope ignored', {
+                if (envelope.eventType !== TELEMETRY_TOPICS.BATCHED) {
+                  logDebug('non-batched envelope ignored', {
                     eventType: envelope.eventType,
                   });
                   continue;
                 }
 
                 const payload = fromBinary(
-                  TelemetryIpfsPublishedPayloadSchema,
+                  TelemetryBatchedPayloadSchema,
                   envelope.payload
-                ) as TelemetryIpfsPublishedPayload;
-
-                // Convert CID bytes to string
-                const cidBytes = payload.cid;
-                const cid = CID.decode(cidBytes);
-                const cidString = cid.toString();
+                ) as TelemetryBatchedPayload;
 
                 metrics.consumed += 1;
 
-                logInfo('anchoring IPFS CID to blockchain', {
+                // Defensive size invariant: the batcher owns payload fitting,
+                // but blockchain-anchor must not submit a payload that
+                // violates the CPS size limit. This is a permanent upstream
+                // contract error, not a transient failure — do not split the
+                // batch here, and do not retry.
+                if (payload.payload.length > config.maxPayloadBytes) {
+                  metrics.rejectedOversized += 1;
+                  logError(
+                    'rejecting batch: payload exceeds ANCHOR_MAX_PAYLOAD_BYTES',
+                    new Error('ANCHOR_PAYLOAD_TOO_LARGE'),
+                    {
+                      batch_id: payload.batchId,
+                      payload_size: payload.payload.length,
+                      max_payload_bytes: config.maxPayloadBytes,
+                      node_id: config.nodeId,
+                    }
+                  );
+
+                  // Commit the offset: this is a permanent contract
+                  // violation upstream, retrying will not help.
+                  await consumer.commit({
+                    offsets: [
+                      {
+                        topic: TELEMETRY_TOPICS.BATCHED,
+                        partition: message.partition,
+                        offset: message.offset + 1n,
+                        leaderEpoch: -1,
+                      },
+                    ],
+                  });
+                  continue;
+                }
+
+                logInfo('anchoring batch to blockchain', {
                   event_id: envelope.eventId,
-                  cid: cidString,
+                  batch_id: payload.batchId,
+                  payload_size: payload.payload.length,
                   event_count: payload.eventCount,
-                  compression: payload.compression,
                   node_id: config.nodeId,
                 });
 
@@ -352,15 +395,22 @@ export function createBlockchainAnchorService(
                   // redelivery the on-chain state already reflects the
                   // anchor, so we skip re-submission instead of creating a
                   // duplicate logical anchor operation.
-                  const anchoredCid = await getAnchoredCid(api!, config.nodeId);
+                  const anchoredPayload = await getAnchoredPayload(
+                    api!,
+                    config.nodeId
+                  );
 
-                  if (anchoredCid === cidString) {
+                  if (
+                    anchoredPayload !== null &&
+                    bytesEqual(anchoredPayload, payload.payload)
+                  ) {
                     metrics.skippedDuplicate += 1;
 
                     logInfo(
-                      'CID already anchored on-chain; skipping duplicate submission',
+                      'batch already anchored on-chain; skipping duplicate submission',
                       {
-                        cid: cidString,
+                        batch_id: payload.batchId,
+                        payload_size: payload.payload.length,
                         event_id: envelope.eventId,
                         node_id: config.nodeId,
                       }
@@ -371,13 +421,14 @@ export function createBlockchainAnchorService(
                       keyring!,
                       config.suri,
                       config.nodeId,
-                      cidBytes
+                      payload.payload
                     );
 
                     metrics.anchored += 1;
 
-                    logInfo('CID anchored successfully', {
-                      cid: cidString,
+                    logInfo('batch anchored successfully', {
+                      batch_id: payload.batchId,
+                      payload_size: payload.payload.length,
                       event_count: payload.eventCount,
                       node_id: config.nodeId,
                     });
@@ -388,7 +439,7 @@ export function createBlockchainAnchorService(
                   await consumer.commit({
                     offsets: [
                       {
-                        topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+                        topic: TELEMETRY_TOPICS.BATCHED,
                         partition: message.partition,
                         offset: message.offset + 1n,
                         leaderEpoch: -1,
@@ -402,8 +453,9 @@ export function createBlockchainAnchorService(
                   });
                 } catch (error) {
                   metrics.failed += 1;
-                  logError('failed to anchor CID', error, {
-                    cid: cidString,
+                  logError('failed to anchor batch', error, {
+                    batch_id: payload.batchId,
+                    payload_size: payload.payload.length,
                     node_id: config.nodeId,
                   });
                   // Don't commit offset on failure - message will be retried
@@ -417,7 +469,7 @@ export function createBlockchainAnchorService(
                 await consumer.commit({
                   offsets: [
                     {
-                      topic: TELEMETRY_TOPICS.IPFS_PUBLISHED,
+                      topic: TELEMETRY_TOPICS.BATCHED,
                       partition: message.partition,
                       offset: message.offset + 1n,
                       leaderEpoch: -1,

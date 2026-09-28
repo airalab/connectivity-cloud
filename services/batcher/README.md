@@ -1,21 +1,29 @@
 # `@scp/batcher`
 
-Groups authorized telemetry into deterministic batches and emits them for
-downstream publication.
+Groups authorized telemetry into deterministic batches, compresses and
+size-fits them, and emits chain-ready payloads for direct blockchain
+anchoring.
 
 ## Architecture
 
 - **Pattern**: Standard consumer with manual commit
 - **Input**: `telemetry.authorized.v1` from Kafka
-- **Output**: `telemetry.batched.v1` (carries a serialized `SignedEnvelopeBatch`)
+- **Output**: `telemetry.batched.v1` (carries an XZ-compressed, chain-ready payload)
 - **Autocommit**: Disabled (commit only after the batch is durably produced)
 - **Concurrency**: Single active flush per instance (single-flight); a timer-triggered flush cannot publish the same batch as a size/lag-triggered flush
 - **Shutdown**: Waits for any in-flight flush and flushes the remaining batch before closing resources
 
-Separating batching from IPFS publishing keeps the publisher stateless and
-lets each side scale and fail independently. The batcher owns buffering,
-flush timing, and offset commits for the authorized topic; the
-`@scp/ipfs-publisher` owns durable IPFS publication of `telemetry.batched.v1`.
+The batcher serializes each detached batch as a `SignedEnvelopeBatch`
+protobuf, XZ-compresses it, and — if the compressed result exceeds
+`ANCHOR_MAX_PAYLOAD_BYTES` — recursively splits it into smaller sub-batches
+until every emitted payload fits. Each sub-batch becomes its own
+`telemetry.batched.v1` message with its own `batch_id`. A single event whose
+compressed size alone exceeds the limit cannot be split further and is
+routed to the dead-letter queue instead of blocking the rest of the batch.
+
+This keeps `blockchain-anchor` simple and stateless: it only needs to submit
+already-compressed, already-size-checked bytes via `cps.setPayload`, with no
+IPFS/CID indirection in between.
 
 ## Batching Strategy
 
@@ -35,6 +43,7 @@ concurrent flush paths can never publish the same batch twice.
 - `BATCHER_HEALTH_PORT` (default: `3041`)
 - `BATCHER_BATCH_SIZE` (default: `10`) - Maximum messages per batch
 - `BATCHER_BATCH_TIMEOUT_MS` (default: `30000`) - Timeout for partial batches under low load
+- `ANCHOR_MAX_PAYLOAD_BYTES` (default: `8192`) - Maximum compressed payload size per emitted batch; larger batches are recursively split, shared default defined in `@scp/core`
 
 ## Metrics
 
@@ -43,6 +52,8 @@ Available at `http://localhost:3041/metrics`:
 - `consumed`: Total authorized telemetry messages consumed
 - `batchesProduced`: Total batches produced to `telemetry.batched.v1`
 - `eventsBatched`: Total individual telemetry events batched
+- `batchesSplit`: Total detached batches that required splitting into multiple sub-batches
+- `oversizedEvents`: Total individual events that could not fit even alone and were routed to the DLQ
 - `produceFailure`: Failed batch produce attempts (re-attached for retry)
 
 ## Data Flow
@@ -50,10 +61,11 @@ Available at `http://localhost:3041/metrics`:
 1. Consume `telemetry.authorized.v1` event from Kafka
 2. Extract `SignedEnvelope` from payload and add to the current batch
 3. When the batch is full, lag is high, or the flush timer fires:
-   - Serialize the batch as a `SignedEnvelopeBatch` protobuf
-   - Wrap it in a `TelemetryBatchedPayload` (`batch_id`, `event_count`, `sensor_ids`)
-   - Produce a `telemetry.batched.v1` envelope to Kafka
-   - Commit `telemetry.authorized.v1` offsets (only after the batch is produced)
+   - Serialize the batch as a `SignedEnvelopeBatch` protobuf and XZ-compress it
+   - If the compressed payload exceeds `ANCHOR_MAX_PAYLOAD_BYTES`, recursively split the batch until every sub-batch fits (oversized single events go to the DLQ)
+   - Wrap each fitted sub-batch in a `TelemetryBatchedPayload` (`batch_id`, `payload`, `uncompressed_size`, `compressed_size`, `payload_hash`, `event_count`, `sensor_ids`)
+   - Produce one `telemetry.batched.v1` envelope per sub-batch to Kafka
+   - Commit `telemetry.authorized.v1` offsets (only after all sub-batches are produced)
 
 ## Result Event Schema
 
@@ -61,10 +73,13 @@ Published to `telemetry.batched.v1`:
 
 ```typescript
 {
-  batchId: string;               // Unique batch identifier
-  signedEnvelopeBatch: Uint8Array; // Serialized crypto.v1.SignedEnvelopeBatch
-  eventCount: number;            // Number of telemetry events in batch
-  sensorIds: Uint8Array[];       // Sensor IDs present in the batch (observability)
+  batchId: string;              // Unique batch identifier (per sub-batch)
+  payload: Uint8Array;          // XZ-compressed, chain-ready crypto.v1.SignedEnvelopeBatch
+  uncompressedSize: number;     // Size of the serialized batch before compression
+  compressedSize: number;       // Size of `payload` (<= ANCHOR_MAX_PAYLOAD_BYTES)
+  payloadHash: Uint8Array;      // blake2_256 hash of `payload`
+  eventCount: number;           // Number of telemetry events in this sub-batch
+  sensorIds: Uint8Array[];      // Sensor IDs present in this sub-batch (observability)
 }
 ```
 

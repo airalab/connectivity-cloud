@@ -6,13 +6,13 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 
 ## High-level architecture
 
-`Sensor -> Endpoint -> Message Bus (Kafka) -> Services (IPFS, PubSub, Blockchain)`
+`Sensor -> Endpoint -> Message Bus (Kafka) -> Services (PubSub, Batcher, Blockchain Anchor)`
 
 > Authorization source: `Robonomics Blockchain -> Registry Sync -> Redis -> Endpoint` or `Whitelist -> Redis -> Endpoint`
 
 ### PubSub Broadcast
 
-`Trusted Messages (Kafka) -> PubSub Broadcaster -> IPFS PubSub -> Web UI (sensors.social)`
+`Trusted Messages (Kafka) -> PubSub Broadcaster -> libp2p GossipSub -> Web UI (sensors.social)`
 
 ### Heartbeat observability
 
@@ -20,7 +20,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 
 ### Blockchain anchoring
 
-`Trusted Messages (Kafka) -> Batcher -> Message Bus (Kafka) -> IPFS Publisher -> Message Bus (Kafka) -> Robonomics Blockchain`
+`Trusted Messages (Kafka) -> Batcher -> Message Bus (Kafka) -> Blockchain Anchor -> Robonomics Blockchain`
 
 ## Module responsibilities
 
@@ -68,30 +68,25 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 ### Batcher
 - Consumes authorized events from `telemetry.authorized.v1`.
 - Groups events into deterministic batches by size, consumer lag, and a bounded flush timer.
-- Serializes each batch as a `crypto.v1.SignedEnvelopeBatch` and emits `telemetry.batched.v1`.
+- Serializes each batch as a `crypto.v1.SignedEnvelopeBatch`, XZ-compresses it, and recursively splits it into smaller sub-batches if the compressed result exceeds `ANCHOR_MAX_PAYLOAD_BYTES`.
+- Emits one `telemetry.batched.v1` message per fitted sub-batch, each carrying the compressed payload, its size/hash fields, and its own `batch_id`.
+- Routes single events that cannot fit even alone to `telemetry.dlq.v1` without blocking the rest of the batch.
 - Serializes flushes (single active flush per instance) so a timer-triggered flush cannot publish the same batch as a size/lag-triggered flush.
 - Flushes any pending batch during graceful shutdown before closing resources.
-- Commits `telemetry.authorized.v1` offsets only after the batch is durably produced.
+- Commits `telemetry.authorized.v1` offsets only after all sub-batches are durably produced.
 
-### IPFS Publisher
+### Blockchain Anchor
 - Consumes batched events from `telemetry.batched.v1`.
-- Publishes/pins each batch artifact to IPFS (optionally XZ-compressed) and captures the CID.
-- Deduplicates by `batch_id` to avoid duplicate publication of redelivered batches.
-- Emits `ipfs.published.v1` with `cid` and `event_count`.
-- Commits `telemetry.batched.v1` offsets only after publish success and result emission.
-
-### Robonomics Blockchain
-- Consumes IPFS-published events (`ipfs.published.v1`) from Kafka.
-- Publishes the CID into the substrate-based Robonomics blockchain to make the CID immutable.
-- Deduplicates by CID before submission.
-- Emits anchoring result events (`telemetry.blockchain.result.v1`).
-- Commits offset only after blockchain submission confirmation.
+- Defensively rejects (permanent error, offset committed) any payload exceeding `ANCHOR_MAX_PAYLOAD_BYTES`.
+- Submits the compressed payload bytes directly into the substrate-based Robonomics blockchain via `cps.setPayload` to make the batch immutable.
+- Deduplicates by comparing the current on-chain payload bytes against the incoming payload before submission.
+- Commits offset only after blockchain submission confirmation (or a confirmed idempotent skip/rejection).
+- Emitting an anchoring result event (`telemetry.blockchain.result.v1`) is deferred to a future phase.
 
 ## Core Kafka topics
 - `telemetry.authorized.v1`
 - `telemetry.rejected.v1`
 - `telemetry.batched.v1`
-- `ipfs.published.v1`
 - `telemetry.dlq.v1`
 
 ## Error handling baseline
@@ -104,8 +99,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 - Allowed flow: `Endpoint -> Kafka -> Consumers`.
 - Disallowed direct couplings:
   - Endpoint -> PubSub
-  - Endpoint -> IPFS
-  - PubSub -> IPFS
-  - Batcher -> IPFS (must flow through Kafka)
-  - IPFS -> Blockchain (must flow through Kafka)
+  - Endpoint -> Blockchain Anchor
+  - PubSub -> Batcher
+  - Batcher -> Blockchain Anchor (must flow through Kafka)
 - Authentication is pluggable via `SensorAuth` interface but must use Redis for low-latency lookups.

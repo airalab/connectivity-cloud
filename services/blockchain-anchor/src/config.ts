@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES } from '@scp/core';
+
 export interface BlockchainAnchorConfig {
   kafkaBrokers: string[];
   consumerGroupId: string;
@@ -20,6 +22,8 @@ export interface BlockchainAnchorConfig {
   suri: string;
   nodeId: number;
   healthPort: number;
+  /** Maximum size, in bytes, of a chain-ready compressed payload (defensive check). */
+  maxPayloadBytes: number;
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -61,5 +65,9 @@ export function loadBlockchainAnchorConfig(
     suri,
     nodeId: nodeIdParsed,
     healthPort: parsePositiveInt(env.BLOCKCHAIN_ANCHOR_HEALTH_PORT, 3050),
+    maxPayloadBytes: parsePositiveInt(
+      env.ANCHOR_MAX_PAYLOAD_BYTES,
+      DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES
+    ),
   };
 }

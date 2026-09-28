@@ -63,6 +63,7 @@ describe('loadBlockchainAnchorConfig', () => {
     expect(config.consumerGroupId).toBe('blockchain-anchor-v1');
     expect(config.substrateWsUrl).toBe('ws://localhost:9944');
     expect(config.healthPort).toBe(3050);
+    expect(config.maxPayloadBytes).toBe(8192);
   });
 
   it('parses node_id as zero', () => {

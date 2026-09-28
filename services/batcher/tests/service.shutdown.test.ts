@@ -36,6 +36,7 @@ function testConfig(overrides: Partial<BatcherConfig> = {}): BatcherConfig {
     // Large timeout so the flush timer never fires during the test; the only
     // flush should be the one triggered by graceful shutdown.
     batchTimeoutMs: 60000,
+    maxPayloadBytes: 8192,
     ...overrides,
   };
 }

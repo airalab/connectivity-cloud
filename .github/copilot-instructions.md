@@ -39,10 +39,9 @@ This is an **event-driven telemetry pipeline** with Kafka as the central durable
 4. Multiple **downstream consumers** process authorized events independently:
    - **pubsub-broadcaster**: Publishes to libp2p/GossipSub for real-time web UI
    - **heartbeat-tracker**: Tracks sensor liveness/uptime metrics (observability-only, no DLQ)
-   - **batcher**: Batches authorized telemetry and emits `telemetry.batched.v1`
-5. **batcher** → **ipfs-publisher** → **blockchain-anchor** publication chain:
-   - **ipfs-publisher**: Consumes `telemetry.batched.v1`, publishes batches to IPFS, emits CIDs
-   - **blockchain-anchor**: Anchors IPFS CIDs to Robonomics blockchain
+   - **batcher**: Batches authorized telemetry, XZ-compresses and splits it to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`
+5. **batcher** → **blockchain-anchor** publication chain:
+   - **blockchain-anchor**: Consumes `telemetry.batched.v1`, submits the compressed payload via `cps.setPayload` to anchor it on the Robonomics blockchain, deduplicating by comparing against the current on-chain payload
 
 ### Key Architectural Constraints
 - **No direct coupling** between processing modules (all flow through Kafka)
@@ -60,8 +59,7 @@ Robonomics Blockchain → registry-sync → Redis → endpoint (lookup during va
 ### Core Kafka Topics
 - `telemetry.authorized.v1` - Successfully validated telemetry
 - `telemetry.rejected.v1` - Failed validation (signature/timestamp/auth)
-- `telemetry.batched.v1` - Batched authorized telemetry ready for publication
-- `ipfs.published.v1` - IPFS publish results (includes CID)
+- `telemetry.batched.v1` - XZ-compressed, chain-ready batched telemetry (submitted directly via `cps.setPayload`)
 - `telemetry.blockchain.result.v1` - Blockchain anchoring results
 - `telemetry.retry.v1` - Transient failures for retry
 - `telemetry.dlq.v1` - Exhausted retries (dead letters)
@@ -73,9 +71,8 @@ Robonomics Blockchain → registry-sync → Redis → endpoint (lookup during va
 - `services/whitelist` - Whitelist-based sensor auth provider
 - `services/pubsub-broadcaster` - Kafka→libp2p GossipSub bridge
 - `services/heartbeat-tracker` - Observability metrics (online sensors, uptime)
-- `services/batcher` - Kafka batcher (authorized → `telemetry.batched.v1`)
-- `services/ipfs-publisher` - Kafka→IPFS publisher (Kubo RPC)
-- `services/blockchain-anchor` - IPFS CID→blockchain anchoring
+- `services/batcher` - Kafka batcher (authorized → XZ-compressed, size-fitted `telemetry.batched.v1`)
+- `services/blockchain-anchor` - Anchors compressed batch payloads to the Robonomics CPS pallet via `cps.setPayload`
 - `tools/fake-sensor-cli` - Generate test telemetry with Ed25519 signatures
 
 ## Key Conventions and Patterns
@@ -112,7 +109,7 @@ All Kafka events follow a strict envelope schema (see `packages/contracts/src/en
 All Kafka consumers follow the same processing rule (see `packages/contracts/src/consumer-runtime.ts`):
 1. Consume event
 2. Check deduplication (if applicable)
-3. Perform external action (e.g., publish to PubSub/IPFS)
+3. Perform external action (e.g., publish to PubSub, submit blockchain extrinsic)
 4. Wait for confirmation
 5. Emit result event
 6. Commit offset
@@ -127,7 +124,7 @@ Use `runConsumerProcessingRule()` helper with:
 - Services load config from environment variables with defaults
 - Common pattern: `load<Service>Config()` function validates and returns typed config
 - Use zod schemas for validation where possible
-- Required infrastructure endpoints: Kafka, Redis, IPFS Kubo RPC, Robonomics node
+- Required infrastructure endpoints: Kafka, Redis, Robonomics node
 
 ### Naming Conventions
 - Services: `@scp/<name>` (e.g., `@scp/endpoint`)
@@ -152,7 +149,7 @@ Use `runConsumerProcessingRule()` helper with:
 1. Prerequisites: Node.js 20 (`.nvmrc`), pnpm 9+, Docker Compose
 2. `pnpm install`
 3. `cp .env.example .env` and configure as needed
-4. `docker compose up -d` (starts Kafka, Redis, IPFS, Robonomics node)
+4. `docker compose up -d` (starts Kafka, Redis, Robonomics node)
 5. `pnpm dev` (starts all services) or `pnpm --filter @scp/<name> dev` (single service)
 
 ## Testing Philosophy

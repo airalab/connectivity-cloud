@@ -17,8 +17,8 @@
 /**
  * Callback invoked with the detached batch when a flush runs.
  *
- * It must fully complete the external work (e.g. publish to IPFS and commit
- * Kafka offsets) before resolving. If it rejects, the flusher re-attaches the
+ * It must fully complete the external work (e.g. compress and produce to
+ * Kafka) before resolving. If it rejects, the flusher re-attaches the
  * batch so it is not lost and can be retried on a later flush.
  */
 export type FlushHandler<T> = (batch: readonly T[]) => Promise<void>;
