@@ -115,6 +115,15 @@ Submit sensor telemetry data.
 - `409 Conflict` - Duplicate nonce (replay attack detected)
 - `503 Service Unavailable` - Kafka unavailable
 
+### GET /
+
+Static, minimalistic status page. Server-rendered markup is identical on
+every request (no server-side probing); an inline script in the page polls
+this service's `/health` plus each sibling service's `/health` endpoint
+(ports read from `.env`, reachable at `STATUS_PAGE_HOST`, default
+`localhost`) directly from the browser and refreshes the table every 5
+seconds.
+
 ### GET /health
 
 Health check endpoint.

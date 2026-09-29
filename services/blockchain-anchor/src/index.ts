@@ -658,6 +658,9 @@ function startHealthAndMetricsServer(
       logDebug('health check requested');
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');
+      // Allow the endpoint service's status page to poll this endpoint
+      // directly from the browser.
+      response.setHeader('access-control-allow-origin', '*');
       response.end(JSON.stringify({ status: 'ok' }));
       return;
     }

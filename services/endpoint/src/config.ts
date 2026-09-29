@@ -13,11 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+export interface StatusTargetConfig {
+  name: string;
+  port: number;
+}
+
 export interface EndpointConfig {
   port: number;
   source: string;
   kafkaBrokers: string[];
   timestampSkewSeconds: number;
+  /** Host used to reach sibling services' health ports for the status page. */
+  statusHost: string;
+  /** Sibling services (with their default ports) shown on the status page. */
+  statusTargets: StatusTargetConfig[];
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -46,5 +55,28 @@ export function loadEndpointConfig(
       env.ENDPOINT_TIMESTAMP_SKEW_SECONDS,
       300
     ),
+    statusHost: env.STATUS_PAGE_HOST ?? 'localhost',
+    statusTargets: [
+      {
+        name: 'registry-sync',
+        port: parsePositiveInt(env.REGISTRY_SYNC_HEALTH_PORT, 3011),
+      },
+      {
+        name: 'pubsub-broadcaster',
+        port: parsePositiveInt(env.PUBSUB_BROADCASTER_HEALTH_PORT, 3020),
+      },
+      {
+        name: 'heartbeat-tracker',
+        port: parsePositiveInt(env.HEARTBEAT_TRACKER_HEALTH_PORT, 3030),
+      },
+      {
+        name: 'batcher',
+        port: parsePositiveInt(env.BATCHER_HEALTH_PORT, 3041),
+      },
+      {
+        name: 'blockchain-anchor',
+        port: parsePositiveInt(env.BLOCKCHAIN_ANCHOR_HEALTH_PORT, 3050),
+      },
+    ],
   };
 }
