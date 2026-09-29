@@ -38,12 +38,13 @@ import {
   type EndpointEventProducer,
 } from './producer.js';
 import { Producer } from '@platformatic/kafka';
-import { loadEndpointConfig } from './config.js';
+import { loadEndpointConfig, type StatusTargetConfig } from './config.js';
 import {
   createSensorAuthProvider,
   loadSensorAuthConfig,
 } from './sensor-auth-factory.js';
 import { logDebug, logError, logInfo, logWarn } from './logger.js';
+import { renderStatusPage } from './status-page.js';
 
 export interface EndpointDeps {
   registryReader: RegistryReader;
@@ -52,6 +53,12 @@ export interface EndpointDeps {
 
 export interface EndpointAppOptions {
   timestampSkewSeconds?: number;
+  /** Own listening port, used to probe `/health` for the status page. */
+  statusPort?: number;
+  /** Host used to reach sibling services' health ports. */
+  statusHost?: string;
+  /** Sibling services (with default ports) shown on the status page. */
+  statusTargets?: StatusTargetConfig[];
 }
 
 async function parseSignedEnvelope(request: FastifyRequest): Promise<{
@@ -102,8 +109,25 @@ export function createEndpointApp(
     timeWindow: '1 minute',
   });
 
-  app.get('/health', async () => ({ status: 'ok' }));
+  app.get('/health', async (_request, reply) => {
+    reply.header('access-control-allow-origin', '*');
+    return { status: 'ok' };
+  });
   app.get('/metrics', async () => metrics);
+
+  // Static, minimalistic status page: the server renders identical markup
+  // on every request (no server-side probing). A small inline script in
+  // the page itself fetches each service's `/health` endpoint (ports
+  // sourced from `.env`) directly from the browser and keeps the table
+  // updated on an interval.
+  const statusPageHtml = renderStatusPage({
+    selfPort: options.statusPort ?? 3000,
+    host: options.statusHost ?? 'localhost',
+    targets: options.statusTargets ?? [],
+  });
+  app.get('/', async (_request, reply) =>
+    reply.type('text/html; charset=utf-8').send(statusPageHtml)
+  );
 
   // Rejection events are published fire-and-forget from request handlers so
   // that Kafka latency never delays the HTTP response. Track the in-flight
@@ -321,6 +345,9 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
     },
     {
       timestampSkewSeconds: config.timestampSkewSeconds,
+      statusPort: config.port,
+      statusHost: config.statusHost,
+      statusTargets: config.statusTargets,
     }
   );
 
