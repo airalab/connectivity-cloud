@@ -15,8 +15,8 @@ Every telemetry event can be traced through the entire pipeline using `trace_id`
                             │                        │
                             ▼                        ▼
                     ┌──────────────┐      ┌──────────────────┐
-                    │ Redis Nonce  │      │  Consumer Group  │
-                    │  Projection  │      │                  │
+                    │ Sensor Auth  │      │  Consumer Group  │
+                    │ (in-memory)  │      │                  │
                     └──────────────┘      └──────────────────┘
                                                     │
                          ┌──────────────────────────┼──────────────────────────┐

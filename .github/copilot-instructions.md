@@ -51,10 +51,10 @@ This is an **event-driven telemetry pipeline** with Kafka as the central durable
 
 ### Authorization Source
 ```
-Robonomics Blockchain → registry-sync → Redis → endpoint (lookup during validation)
+SENSOR_AUTH_STRATEGY (whitelist | none) → endpoint (in-memory lookup during validation)
 ```
-- **registry-sync** subscribes to finalized blockchain events, projects sensor/key state to Redis
-- **endpoint** reads from Redis (no blockchain RPC in hot path)
+- **whitelist** (default): only sensors in `WHITELIST_SENSOR_IDS` are authorized
+- **none**: any validly-signed sensor is authorized
 
 ### Core Kafka Topics
 - `telemetry.authorized.v1` - Successfully validated telemetry
@@ -67,7 +67,6 @@ Robonomics Blockchain → registry-sync → Redis → endpoint (lookup during va
 ### Workspace Structure
 - `packages/contracts` - Shared schemas, types, validation, and consumer runtime logic (`@scp/core`)
 - `services/endpoint` - HTTP ingress (Fastify, validates protobuf `SignedEnvelope`)
-- `services/registry-sync` - Blockchain→Redis sync (`@polkadot/api` → ioredis)
 - `services/whitelist` - Whitelist-based sensor auth provider
 - `services/pubsub-broadcaster` - Kafka→libp2p GossipSub bridge
 - `services/heartbeat-tracker` - Observability metrics (online sensors, uptime)

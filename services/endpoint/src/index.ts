@@ -29,16 +29,17 @@ import {
   TelemetryAuthorizedPayloadSchema,
 } from '@scp/core';
 import { installShutdownHandler } from '@scp/core';
-import {
-  createRegistryReaderFromEnv,
-  type RegistryReader,
-} from '@scp/registry-sync';
+import type { RegistryReader } from './registry-reader.js';
 import {
   createEndpointEventProducer,
   type EndpointEventProducer,
 } from './producer.js';
 import { Producer } from '@platformatic/kafka';
-import { loadEndpointConfig, type StatusTargetConfig } from './config.js';
+import {
+  loadEndpointConfig,
+  type StatusMetricConfig,
+  type StatusTargetConfig,
+} from './config.js';
 import {
   createSensorAuthProvider,
   loadSensorAuthConfig,
@@ -55,10 +56,10 @@ export interface EndpointAppOptions {
   timestampSkewSeconds?: number;
   /** Own listening port, used to probe `/health` for the status page. */
   statusPort?: number;
-  /** Host used to reach sibling services' health ports. */
-  statusHost?: string;
   /** Sibling services (with default ports) shown on the status page. */
   statusTargets?: StatusTargetConfig[];
+  /** Simple headline metrics (sourced from sibling services) shown on the status page. */
+  statusMetrics?: StatusMetricConfig[];
 }
 
 async function parseSignedEnvelope(request: FastifyRequest): Promise<{
@@ -113,17 +114,20 @@ export function createEndpointApp(
     reply.header('access-control-allow-origin', '*');
     return { status: 'ok' };
   });
-  app.get('/metrics', async () => metrics);
+  app.get('/metrics', async (_request, reply) => {
+    reply.header('access-control-allow-origin', '*');
+    return metrics;
+  });
 
   // Static, minimalistic status page: the server renders identical markup
   // on every request (no server-side probing). A small inline script in
   // the page itself fetches each service's `/health` endpoint (ports
-  // sourced from `.env`) directly from the browser and keeps the table
-  // updated on an interval.
+  // sourced from `.env`) using the browser's own hostname, and keeps the
+  // table updated on an interval.
   const statusPageHtml = renderStatusPage({
     selfPort: options.statusPort ?? 3000,
-    host: options.statusHost ?? 'localhost',
     targets: options.statusTargets ?? [],
+    metrics: options.statusMetrics ?? [],
   });
   app.get('/', async (_request, reply) =>
     reply.type('text/html; charset=utf-8').send(statusPageHtml)
@@ -325,10 +329,7 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
     timestamp_skew_seconds: config.timestampSkewSeconds,
   });
 
-  const registryReader = createSensorAuthProvider(
-    authConfig.strategy,
-    createRegistryReaderFromEnv
-  );
+  const registryReader = createSensorAuthProvider(authConfig.strategy);
 
   // Create Kafka producer with idempotence enabled
   const kafkaProducer = new Producer({
@@ -346,8 +347,8 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
     {
       timestampSkewSeconds: config.timestampSkewSeconds,
       statusPort: config.port,
-      statusHost: config.statusHost,
       statusTargets: config.statusTargets,
+      statusMetrics: config.statusMetrics,
     }
   );
 

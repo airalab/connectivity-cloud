@@ -13,13 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { describe, expect, it } from 'vitest';
-import { logDebug } from '../src/logger.js';
+import type { SensorAuth } from '@scp/core';
 
-describe('registry-sync logger helpers', () => {
-  it('supports debug logs without throwing', () => {
-    expect(() => {
-      logDebug('registry-sync debug test log', { eventId: '1:0' });
-    }).not.toThrow();
-  });
-});
+/** Authorization record for a sensor as seen by the endpoint. */
+export interface SensorRegistryRecord {
+  sensorId: Uint8Array;
+  enabled: boolean;
+}
+
+/** Sensor authorization plus replay-protection (nonce) storage. */
+export interface RegistryReader extends SensorAuth {
+  getSensorRecord(sensorId: Uint8Array): Promise<SensorRegistryRecord | null>;
+  isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean>;
+  rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void>;
+}

@@ -15,7 +15,7 @@ Deliver a production-ready `@scp/contracts` package that provides:
 
 ## Out of scope / Deferred
 - Introducing `v2` contracts or breaking changes to `v1`.
-- Business logic for any concrete service (Authorizer, Registry Sync, IPFS, Blockchain, PubSub).
+- Business logic for any concrete service (Authorizer, IPFS, Blockchain, PubSub).
 - Advanced workflow/SLA orchestration beyond bounded retry + DLQ.
 
 ## Inputs & Outputs

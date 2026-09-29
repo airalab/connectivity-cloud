@@ -13,14 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { type RegistryReader } from '@scp/registry-sync';
 import { WhitelistAuth, loadWhitelistConfig } from '@scp/whitelist';
+import { OpenAuth } from './open-auth.js';
+import type { RegistryReader } from './registry-reader.js';
 import { logInfo, logWarn } from './logger.js';
 
 /**
  * Sensor authentication strategy types.
+ *
+ * - `whitelist`: only sensors listed in `WHITELIST_SENSOR_IDS` are authorized.
+ * - `none`: every validly-signed sensor is authorized (no allowlist).
  */
-export type SensorAuthStrategy = 'registry-sync' | 'whitelist';
+export type SensorAuthStrategy = 'whitelist' | 'none';
 
 /**
  * Configuration for sensor authentication.
@@ -33,16 +37,17 @@ export interface SensorAuthConfig {
  * Loads sensor authentication configuration from environment variables.
  *
  * Environment variables:
- * - SENSOR_AUTH_STRATEGY: Authentication strategy to use (registry-sync or whitelist)
+ * - SENSOR_AUTH_STRATEGY: Authentication strategy to use (whitelist or none,
+ *   default: whitelist)
  */
 export function loadSensorAuthConfig(
   env: NodeJS.ProcessEnv = process.env
 ): SensorAuthConfig {
-  const strategyStr = env.SENSOR_AUTH_STRATEGY ?? 'registry-sync';
-  const strategy = strategyStr === 'whitelist' ? 'whitelist' : 'registry-sync';
+  const strategyStr = env.SENSOR_AUTH_STRATEGY ?? 'whitelist';
+  const strategy = strategyStr === 'none' ? 'none' : 'whitelist';
 
   if (strategyStr !== strategy) {
-    logWarn('invalid SENSOR_AUTH_STRATEGY, defaulting to registry-sync', {
+    logWarn('invalid SENSOR_AUTH_STRATEGY, defaulting to whitelist', {
       provided: strategyStr,
       using: strategy,
     });
@@ -51,54 +56,40 @@ export function loadSensorAuthConfig(
   return { strategy };
 }
 
+interface NonceAwareSensorAuth {
+  authenticate(sensorId: Uint8Array): Promise<boolean>;
+  isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean>;
+  rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void>;
+}
+
+function toRegistryReader(auth: NonceAwareSensorAuth): RegistryReader {
+  return {
+    authenticate: (sensorId) => auth.authenticate(sensorId),
+    async getSensorRecord(sensorId) {
+      const isAuthenticated = await auth.authenticate(sensorId);
+      return isAuthenticated ? { sensorId, enabled: true } : null;
+    },
+    isNonceSeen: (sensorId, nonce) => auth.isNonceSeen(sensorId, nonce),
+    rememberNonce: (sensorId, nonce) => auth.rememberNonce(sensorId, nonce),
+  };
+}
+
 /**
  * Creates a sensor authentication provider based on the configured strategy.
  *
  * @param strategy - The authentication strategy to use
- * @param registryReaderFactory - Factory function to create a RegistryReader instance
- * @returns A RegistryReader instance (registry-sync strategy returns native RegistryReader,
- *          whitelist strategy returns a WhitelistAuth adapter that implements RegistryReader)
+ * @returns A RegistryReader adapter over the selected strategy
  */
 export function createSensorAuthProvider(
-  strategy: SensorAuthStrategy,
-  registryReaderFactory: () => RegistryReader
+  strategy: SensorAuthStrategy
 ): RegistryReader {
   logInfo('creating sensor auth provider', { strategy });
 
-  if (strategy === 'whitelist') {
-    const whitelistConfig = loadWhitelistConfig();
-    const whitelistAuth = new WhitelistAuth(whitelistConfig.allowedSensorIds);
-
-    // Adapt WhitelistAuth to RegistryReader interface
-    return {
-      async authenticate(sensorId: Uint8Array): Promise<boolean> {
-        return whitelistAuth.authenticate(sensorId);
-      },
-      async getSensorRecord(sensorId: Uint8Array) {
-        const isAuthenticated = await whitelistAuth.authenticate(sensorId);
-        if (!isAuthenticated) {
-          return null;
-        }
-        return {
-          sensorId,
-          enabled: true,
-        };
-      },
-      async isNonceSeen(
-        sensorId: Uint8Array,
-        nonce: Uint8Array
-      ): Promise<boolean> {
-        return whitelistAuth.isNonceSeen(sensorId, nonce);
-      },
-      async rememberNonce(
-        sensorId: Uint8Array,
-        nonce: Uint8Array
-      ): Promise<void> {
-        await whitelistAuth.rememberNonce(sensorId, nonce);
-      },
-    };
+  if (strategy === 'none') {
+    logWarn('sensor authentication disabled; any signed sensor is accepted');
+    return toRegistryReader(new OpenAuth());
   }
 
-  // Default to registry-sync strategy
-  return registryReaderFactory();
+  const whitelistConfig = loadWhitelistConfig();
+  return toRegistryReader(new WhitelistAuth(whitelistConfig.allowedSensorIds));
 }

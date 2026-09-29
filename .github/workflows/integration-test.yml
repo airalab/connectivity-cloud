@@ -21,11 +21,7 @@ jobs:
       ENDPOINT_TIMESTAMP_SKEW_SECONDS: "300"
       ENDPOINT_PRODUCER_MAX_ATTEMPTS: "3"
       ENDPOINT_PRODUCER_RETRY_BACKOFF_MS: "100"
-      REGISTRY_REDIS_PREFIX: registry-sync:v1
-      REGISTRY_SYNC_HEALTH_PORT: "3011"
-      REGISTRY_SYNC_MAX_RETRIES: "3"
-      REGISTRY_SYNC_RETRY_BACKOFF_MS: "250"
-      NONCE_TTL_SECONDS: "900"
+      SENSOR_AUTH_STRATEGY: whitelist
       PUBSUB_TOPIC: telemetry/authorized/v1
       PUBSUB_BROADCASTER_GROUP_ID: pubsub-broadcaster-v1
       PUBSUB_BROADCASTER_SOURCE: pubsub-broadcaster
@@ -103,18 +99,11 @@ jobs:
           )"
           echo "SENSOR_ID=${SENSOR_ID}" | tee -a "$GITHUB_ENV"
 
-          docker compose exec -T redis redis-cli HSET "${REGISTRY_REDIS_PREFIX}:sensor:${SENSOR_ID}" \
-            sensor_id "${SENSOR_ID}" \
-            enabled true \
-            updated_at_block 1 \
-            updated_at_event ci-seed >/dev/null
-
           IPFS_PEER_ID="$(curl --silent --show-error --fail -X POST "${IPFS_API_URL}/api/v0/id" | node --input-type=module -e "let data='';process.stdin.on('data',(chunk)=>data+=chunk);process.stdin.on('end',()=>{const parsed=JSON.parse(data);if(!parsed.ID){process.exit(1);}process.stdout.write(parsed.ID);});")"
           PUBSUB_RESERVED_PEERS="/ip4/127.0.0.1/tcp/4001/p2p/${IPFS_PEER_ID}"
           echo "PUBSUB_RESERVED_PEERS=${PUBSUB_RESERVED_PEERS}" | tee -a "$GITHUB_ENV"
 
-          (pnpm --filter @scp/registry-sync dev > logs/registry-sync.log 2>&1 & echo $! > logs/registry-sync.pid)
-          (pnpm --filter @scp/endpoint dev > logs/endpoint.log 2>&1 & echo $! > logs/endpoint.pid)
+          (WHITELIST_SENSOR_IDS="${SENSOR_ID}" pnpm --filter @scp/endpoint dev > logs/endpoint.log 2>&1 & echo $! > logs/endpoint.pid)
           (PUBSUB_RESERVED_PEERS="${PUBSUB_RESERVED_PEERS}" pnpm --filter @scp/pubsub-broadcaster dev > logs/pubsub-broadcaster.log 2>&1 & echo $! > logs/pubsub-broadcaster.pid)
           (pnpm --filter @scp/blockchain-anchor dev > logs/blockchain-anchor.log 2>&1 & echo $! > logs/blockchain-anchor.pid)
 
@@ -139,7 +128,6 @@ jobs:
           }
 
           wait_for_http "Endpoint" "http://127.0.0.1:${ENDPOINT_PORT}/health" "120"
-          wait_for_http "Registry Sync" "http://127.0.0.1:${REGISTRY_SYNC_HEALTH_PORT}/health" "180"
           wait_for_http "Pubsub Broadcaster" "http://127.0.0.1:${PUBSUB_BROADCASTER_HEALTH_PORT}/health" "180"
 
       - name: Send telemetry and collect pubsub deliveries
@@ -215,7 +203,7 @@ jobs:
           fi
 
           if grep -Eqi '(^|[^a-z])(error|exception|unhandledrejection|econnrefused|failed to start|failed to publish)([^a-z]|$)' \
-            logs/endpoint.log logs/registry-sync.log logs/pubsub-broadcaster.log logs/blockchain-anchor.log; then
+            logs/endpoint.log logs/pubsub-broadcaster.log logs/blockchain-anchor.log; then
             echo 'Detected error markers in service logs' >&2
             exit 1
           fi

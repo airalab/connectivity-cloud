@@ -1,22 +1,21 @@
 # WP-02 — `endpoint`
 
 ## Summary
-WP-02 implements trusted telemetry ingress at `POST /v1/telemetry`. The service validates protobuf `SignedEnvelope` payloads, verifies Ed25519 signatures over raw envelope bytes (`sensor_id || timestamp_le || nonce || message`), and authorizes sensors against the Redis projection. Authorized events are published to Kafka, and `202` is returned only after broker acknowledgment.
+WP-02 implements trusted telemetry ingress at `POST /v1/telemetry`. The service validates protobuf `SignedEnvelope` payloads, verifies Ed25519 signatures over raw envelope bytes (`sensor_id || timestamp_le || nonce || message`), and authorizes sensors with a pluggable in-memory strategy (`whitelist` or `none`). Authorized events are published to Kafka, and `202` is returned only after broker acknowledgment.
 
 ## Current status snapshot
-- Implemented: ingress route scaffold, schema validation, Redis-backed sensor/nonce checks, signature verification path, `401/403/409/503/202` response mapping.
+- Implemented: ingress route scaffold, schema validation, whitelist/none sensor auth with in-memory nonce checks, signature verification path, `401/403/409/503/202` response mapping.
 - Implemented in this increment: timestamp skew enforcement, rejection-event publish path (`telemetry.rejected.v1`), bounded producer retry with DLQ fallback, and ACK-gated Kafka publish for `telemetry.authorized.v1`.
 - Remaining for full WP-02 DoD: broader docker-compose integration coverage and formal DoD sign-off.
 
 ## Depends on
 - WP-00
-- WP-01
 
 ## Scope / Goal
 Deliver a working Authorizer ingress path that:
 - Accepts signed sensor telemetry.
 - Applies schema/limits/timestamp window/nonce/signature checks.
-- Checks sensor/key authorization status via Redis projection.
+- Checks sensor authorization via the configured strategy (`SENSOR_AUTH_STRATEGY`: `whitelist` or `none`).
 - Publishes `telemetry.authorized.v1` (and `telemetry.rejected.v1` on rejection conditions).
 - Maps outcomes to the required HTTP response codes.
 
@@ -31,7 +30,7 @@ Deliver a working Authorizer ingress path that:
 - Request body:
   - protobuf `crypto.v1.SignedEnvelope` (`application/protobuf`)
   - optional JSON wrapper with base64 `envelope`
-- Redis projection from WP-01 for sensor/key status.
+- Whitelist (`WHITELIST_SENSOR_IDS`) or `none` sensor authentication strategy (`SENSOR_AUTH_STRATEGY`).
 
 ### Outputs
 - Kafka produced events:
@@ -51,7 +50,7 @@ Deliver a working Authorizer ingress path that:
   - `sensor_id || timestamp_le || nonce || message`
   - verify Ed25519 signature against resolved public key.
 - [x] Enforce timestamp window policy and replay protection using binary-safe dedup key (`hex(sensor_id):hex(nonce)`).
-- [x] Read sensor/key status from Redis projection; reject disabled/unauthorized keys.
+- [x] Authorize sensors via the whitelist/none strategy; reject sensors not on the whitelist.
 - [x] Publish accepted requests to `telemetry.authorized.v1` with canonical envelope/payload from WP-00.
 - [x] Publish rejections to `telemetry.rejected.v1` with reason code/message.
 - [x] Gate `202` response on Kafka ACK success for `telemetry.authorized.v1` publish.
@@ -62,7 +61,7 @@ Deliver a working Authorizer ingress path that:
 - Ingest dedup key: `hex(sensor_id)` + `hex(nonce)`.
 - Duplicate nonce for same sensor must return `409 Conflict`.
 - Signature mismatch must return `401 Unauthorized`.
-- Unauthorized/disabled sensor/key status must return `403 Forbidden`.
+- A sensor not on the whitelist must return `403 Forbidden`.
 - Kafka unavailability/ACK failure must return `503 Service Unavailable`.
 - Rejected-event publication should be best-effort with bounded retry; failures must not incorrectly return `202`.
 
@@ -74,7 +73,7 @@ Deliver a working Authorizer ingress path that:
   - nonce replay detection,
   - HTTP status mapping.
 - Integration tests:
-  - local `docker-compose` Kafka + Redis,
+  - local `docker-compose` Kafka,
   - `202` only when `telemetry.authorized.v1` ACK is received,
   - rejection path publication to `telemetry.rejected.v1`.
 - Contract tests:

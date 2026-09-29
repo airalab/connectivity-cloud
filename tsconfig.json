@@ -5,7 +5,6 @@
     { "path": "./services/endpoint" },
     { "path": "./services/heartbeat-tracker" },
     { "path": "./services/pubsub-broadcaster" },
-    { "path": "./services/registry-sync" },
     { "path": "./services/whitelist" },
     { "path": "./tools/fake-sensor-cli" }
   ]

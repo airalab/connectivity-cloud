@@ -12,8 +12,6 @@ Each WP takes a scaffold/stub service to a working, tested implementation.
 
 ```text
 Sensor -> Endpoint -> Kafka -> {PubSub Broadcaster, Batcher -> Blockchain Anchor}
-                          ^
-Robonomics chain -> Registry Sync -> Redis projection
 ```
 
 ## Work packages
@@ -21,8 +19,8 @@ Robonomics chain -> Registry Sync -> Redis projection
 | WP | Service / Package | Depends on | Status |
 |----|-------------------|------------|--------|
 | [WP-00](./wp-00-contracts.md) | `@scp/contracts` (shared schemas, envelope, topics, consumer runtime) | — | Done |
-| [WP-01](./wp-01-registry-sync.md) | `registry-sync` (substrate → Redis projection) | WP-00 | Implemented (pending formal DoD sign-off) |
-| [WP-02](./wp-02-endpoint.md) | `endpoint` (`POST /v1/telemetry` ingress) | WP-00, WP-01 | Implemented (pending formal DoD sign-off) |
+| WP-01 | `registry-sync` (substrate → Redis projection) | WP-00 | Removed (superseded by whitelist/none auth in `endpoint`) |
+| [WP-02](./wp-02-endpoint.md) | `endpoint` (`POST /v1/telemetry` ingress) | WP-00 | Implemented (pending formal DoD sign-off) |
 | [WP-03](./wp-03-pubsub-broadcaster.md) | `pubsub-broadcaster` (GossipSub fan-out) | WP-00, WP-02 | Implemented |
 | WP-03A | `heartbeat-tracker` (trusted-event liveness & uptime observability) | WP-00, WP-02 | Implemented |
 | [WP-04](./wp-04-ipfs-publisher.md) | `@scp/batcher` (batch, XZ-compress, size-fit) | WP-00, WP-02 | Implemented (superseded `ipfs-publisher`, see note in doc) |
@@ -31,10 +29,9 @@ Robonomics chain -> Registry Sync -> Redis projection
 ## Recommended sequencing
 
 1. **WP-00** first — all services import shared contracts, so freeze schemas/envelope/topics before wiring services.
-2. **WP-01** — the endpoint depends on the registry read path.
-3. **WP-02** — enables end-to-end producing onto Kafka.
-4. **WP-03 / WP-04** in parallel — both consume `telemetry.authorized.v1`.
-5. **WP-05** last — consumes `telemetry.batched.v1` from WP-04.
+2. **WP-02** — enables end-to-end producing onto Kafka.
+3. **WP-03 / WP-04** in parallel — both consume `telemetry.authorized.v1`.
+4. **WP-05** last — consumes `telemetry.batched.v1` from WP-04.
 
 ## Definition of done (applies to every WP)
 

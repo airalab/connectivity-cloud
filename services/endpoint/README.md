@@ -4,47 +4,39 @@ The endpoint service provides the telemetry ingress endpoint (`POST /v1/telemetr
 
 ## Authentication Strategies
 
-The endpoint supports two authentication strategies that can be selected at runtime:
+The endpoint supports two authentication strategies that can be selected at runtime with `SENSOR_AUTH_STRATEGY`. Both run in memory with no external dependencies. The envelope signature and timestamp checks always apply.
 
-### 1. Registry-Sync Strategy (Default)
+### 1. Whitelist Strategy (Default)
 
-Uses the registry-sync service to validate sensors against the on-chain registry projection stored in Redis.
-
-**Features:**
-- Validates sensors against on-chain registry state
-- Real-time updates from blockchain events
-- Checks if sensor is enabled in the registry
-- Nonce replay protection with Redis
-
-**Configuration:**
-```bash
-SENSOR_AUTH_STRATEGY=registry-sync
-```
-
-**Requirements:**
-- Redis instance running
-- Registry-sync service running and populating Redis projection
-
-### 2. Whitelist Strategy
-
-Uses an in-memory allowlist of sensor IDs for authentication.
+Only sensors listed in `WHITELIST_SENSOR_IDS` are authorized. An empty list authorizes nobody.
 
 **Features:**
 - Simple allowlist-based authorization
-- No external dependencies (no Redis, no registry-sync)
 - Fast in-memory lookups
 - Nonce replay protection in memory
 
 **Configuration:**
 ```bash
 SENSOR_AUTH_STRATEGY=whitelist
-WHITELIST_SENSOR_IDS=sensor-1,sensor-2,sensor-3
+WHITELIST_SENSOR_IDS=<ss58-address-1>,<ss58-address-2>
+```
+
+### 2. None Strategy
+
+Every validly-signed sensor is authorized; there is no allowlist.
+
+**Features:**
+- Open ingestion gated only by signature and timestamp validation
+- Nonce replay protection in memory, bounded (oldest nonces are evicted)
+
+**Configuration:**
+```bash
+SENSOR_AUTH_STRATEGY=none
 ```
 
 **Use Cases:**
-- Testing and development
-- Small deployments with static sensor lists
-- Scenarios where blockchain integration is not needed
+- Local development and testing
+- Deployments where authorization is enforced elsewhere
 
 ## Environment Variables
 
@@ -59,7 +51,7 @@ WHITELIST_SENSOR_IDS=sensor-1,sensor-2,sensor-3
 
 ### Authentication Strategy
 
-- `SENSOR_AUTH_STRATEGY` - Authentication strategy: `registry-sync` or `whitelist` (default: `registry-sync`)
+- `SENSOR_AUTH_STRATEGY` - Authentication strategy: `whitelist` or `none` (default: `whitelist`)
 
 ### Whitelist Strategy Configuration
 
@@ -72,11 +64,11 @@ WHITELIST_SENSOR_IDS=sensor-1,sensor-2,sensor-3
 ## Development
 
 ```bash
-# Start endpoint with registry-sync (default)
-pnpm --filter @scp/endpoint dev
+# Start endpoint with the whitelist strategy (default)
+WHITELIST_SENSOR_IDS=<ss58-address> pnpm --filter @scp/endpoint dev
 
-# Start endpoint with whitelist strategy
-SENSOR_AUTH_STRATEGY=whitelist WHITELIST_SENSOR_IDS=sensor-1,sensor-2 pnpm --filter @scp/endpoint dev
+# Start endpoint accepting any validly-signed sensor
+SENSOR_AUTH_STRATEGY=none pnpm --filter @scp/endpoint dev
 ```
 
 ## Testing
@@ -117,12 +109,19 @@ Submit sensor telemetry data.
 
 ### GET /
 
-Static, minimalistic status page. Server-rendered markup is identical on
+Static, minimalistic status page branded with the Robonomics Network logo
+(inlined SVG; the black variant is shown in light mode and the white variant
+in dark mode). Server-rendered markup is identical on
 every request (no server-side probing); an inline script in the page polls
 this service's `/health` plus each sibling service's `/health` endpoint
-(ports read from `.env`, reachable at `STATUS_PAGE_HOST`, default
-`localhost`) directly from the browser and refreshes the table every 5
-seconds.
+(ports read from `.env`) using `window.location.hostname` — the same host
+the browser used to load the page — directly from the browser, and
+refreshes the table every 5 seconds. Services are listed by descriptive
+name (e.g. "Telemetry Batcher") with the technical service name shown
+underneath. Below the service table, a small
+metrics section polls each sibling's `/metrics` endpoint for a few
+headline numbers: online sensors (heartbeat-tracker), connected libp2p
+peers (pubsub-broadcaster), and anchored messages (blockchain-anchor).
 
 ### GET /health
 

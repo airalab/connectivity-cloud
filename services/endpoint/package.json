@@ -16,7 +16,6 @@
     "@fastify/rate-limit": "^11.2.0",
     "@platformatic/kafka": "^2.9.0",
     "@scp/core": "workspace:*",
-    "@scp/registry-sync": "workspace:*",
     "@scp/whitelist": "workspace:*",
     "fastify": "^5.12.0",
     "pino": "^10.3.1"

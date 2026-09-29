@@ -20,7 +20,7 @@ import {
   loadSensorAuthConfig,
   createSensorAuthProvider,
 } from '../src/sensor-auth-factory.js';
-import { InMemoryRegistryReader } from '@scp/registry-sync';
+import { OpenAuth } from '../src/open-auth.js';
 
 // Helper to create SS58 test addresses (using Robonomics prefix 32)
 function createTestAddress(): { address: string; pubkey: Uint8Array } {
@@ -41,49 +41,28 @@ describe('sensor auth factory', () => {
   });
 
   describe('loadSensorAuthConfig', () => {
-    it('should default to registry-sync strategy', () => {
+    it('should default to whitelist strategy', () => {
       delete process.env.SENSOR_AUTH_STRATEGY;
 
-      const config = loadSensorAuthConfig();
-
-      expect(config.strategy).toBe('registry-sync');
+      expect(loadSensorAuthConfig().strategy).toBe('whitelist');
     });
 
-    it('should load whitelist strategy from env', () => {
-      process.env.SENSOR_AUTH_STRATEGY = 'whitelist';
+    it('should load none strategy from env', () => {
+      process.env.SENSOR_AUTH_STRATEGY = 'none';
 
-      const config = loadSensorAuthConfig();
-
-      expect(config.strategy).toBe('whitelist');
+      expect(loadSensorAuthConfig().strategy).toBe('none');
     });
 
-    it('should default to registry-sync for invalid strategy', () => {
+    it('should default to whitelist for invalid strategy (including removed registry-sync)', () => {
+      process.env.SENSOR_AUTH_STRATEGY = 'registry-sync';
+      expect(loadSensorAuthConfig().strategy).toBe('whitelist');
+
       process.env.SENSOR_AUTH_STRATEGY = 'invalid-strategy';
-
-      const config = loadSensorAuthConfig();
-
-      expect(config.strategy).toBe('registry-sync');
+      expect(loadSensorAuthConfig().strategy).toBe('whitelist');
     });
   });
 
   describe('createSensorAuthProvider', () => {
-    it('should create registry-sync provider', async () => {
-      const sensor1 = createTestAddress();
-      const sensor2 = createTestAddress();
-
-      const mockRegistryReader = new InMemoryRegistryReader([
-        { sensorId: sensor1.pubkey, enabled: true },
-      ]);
-
-      const provider = createSensorAuthProvider(
-        'registry-sync',
-        () => mockRegistryReader
-      );
-
-      expect(await provider.authenticate(sensor1.pubkey)).toBe(true);
-      expect(await provider.authenticate(sensor2.pubkey)).toBe(false);
-    });
-
     it('should create whitelist provider', async () => {
       const sensorA = createTestAddress();
       const sensorB = createTestAddress();
@@ -92,16 +71,22 @@ describe('sensor auth factory', () => {
 
       process.env.WHITELIST_SENSOR_IDS = `${sensorA.address},${sensorB.address},${sensorC.address}`;
 
-      const mockRegistryReader = new InMemoryRegistryReader([]);
-      const provider = createSensorAuthProvider(
-        'whitelist',
-        () => mockRegistryReader
-      );
+      const provider = createSensorAuthProvider('whitelist');
 
       expect(await provider.authenticate(sensorA.pubkey)).toBe(true);
       expect(await provider.authenticate(sensorB.pubkey)).toBe(true);
       expect(await provider.authenticate(sensorC.pubkey)).toBe(true);
       expect(await provider.authenticate(sensorD.pubkey)).toBe(false);
+    });
+
+    it('should authorize nobody with an empty whitelist', async () => {
+      delete process.env.WHITELIST_SENSOR_IDS;
+
+      const provider = createSensorAuthProvider('whitelist');
+
+      expect(await provider.authenticate(createTestAddress().pubkey)).toBe(
+        false
+      );
     });
 
     it('should handle nonce management for whitelist provider', async () => {
@@ -110,11 +95,7 @@ describe('sensor auth factory', () => {
 
       process.env.WHITELIST_SENSOR_IDS = sensor1.address;
 
-      const mockRegistryReader = new InMemoryRegistryReader([]);
-      const provider = createSensorAuthProvider(
-        'whitelist',
-        () => mockRegistryReader
-      );
+      const provider = createSensorAuthProvider('whitelist');
 
       expect(await provider.isNonceSeen(sensor1.pubkey, nonce1)).toBe(false);
       await provider.rememberNonce(sensor1.pubkey, nonce1);
@@ -128,20 +109,53 @@ describe('sensor auth factory', () => {
 
       process.env.WHITELIST_SENSOR_IDS = `${sensor1.address},${sensor2.address}`;
 
-      const mockRegistryReader = new InMemoryRegistryReader([]);
-      const provider = createSensorAuthProvider(
-        'whitelist',
-        () => mockRegistryReader
-      );
+      const provider = createSensorAuthProvider('whitelist');
 
-      const record = await provider.getSensorRecord(sensor1.pubkey);
-      expect(record).toEqual({
+      expect(await provider.getSensorRecord(sensor1.pubkey)).toEqual({
         sensorId: sensor1.pubkey,
         enabled: true,
       });
+      expect(await provider.getSensorRecord(unknown.pubkey)).toBeNull();
+    });
 
-      const unknownRecord = await provider.getSensorRecord(unknown.pubkey);
-      expect(unknownRecord).toBeNull();
+    it('should authorize any sensor with the none provider', async () => {
+      process.env.WHITELIST_SENSOR_IDS = '';
+      const sensor = createTestAddress();
+
+      const provider = createSensorAuthProvider('none');
+
+      expect(await provider.authenticate(sensor.pubkey)).toBe(true);
+      expect(await provider.getSensorRecord(sensor.pubkey)).toEqual({
+        sensorId: sensor.pubkey,
+        enabled: true,
+      });
+    });
+
+    it('should track nonces for the none provider', async () => {
+      const sensor = createTestAddress();
+      const nonce = randomBytes(16);
+
+      const provider = createSensorAuthProvider('none');
+
+      expect(await provider.isNonceSeen(sensor.pubkey, nonce)).toBe(false);
+      await provider.rememberNonce(sensor.pubkey, nonce);
+      expect(await provider.isNonceSeen(sensor.pubkey, nonce)).toBe(true);
+    });
+  });
+
+  describe('OpenAuth', () => {
+    it('should evict the oldest nonce once the bound is exceeded', async () => {
+      const auth = new OpenAuth(2);
+      const sensor = randomBytes(32);
+      const [n1, n2, n3] = [randomBytes(16), randomBytes(16), randomBytes(16)];
+
+      await auth.rememberNonce(sensor, n1);
+      await auth.rememberNonce(sensor, n2);
+      await auth.rememberNonce(sensor, n3);
+
+      expect(await auth.isNonceSeen(sensor, n1)).toBe(false);
+      expect(await auth.isNonceSeen(sensor, n2)).toBe(true);
+      expect(await auth.isNonceSeen(sensor, n3)).toBe(true);
     });
   });
 });

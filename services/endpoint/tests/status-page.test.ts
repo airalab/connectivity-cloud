@@ -15,17 +15,20 @@
  */
 import { describe, expect, it } from 'vitest';
 import { renderStatusPage } from '../src/status-page.js';
-import { InMemoryRegistryReader } from '@scp/registry-sync';
+import {
+  STATUS_LOGO_DARK_SVG,
+  STATUS_LOGO_LIGHT_SVG,
+} from '../src/status-logo.js';
+import { InMemoryRegistryReader } from './in-memory-registry-reader.js';
 import { createEndpointApp } from '../src/index.js';
 
 describe('renderStatusPage', () => {
-  it('renders fully static markup listing each configured service and its port', () => {
+  it('renders fully static markup listing each configured service with its health port', () => {
     const html = renderStatusPage({
       selfPort: 3000,
-      host: 'localhost',
       targets: [
-        { name: 'batcher', port: 3041 },
-        { name: 'registry-sync', port: 3011 },
+        { name: 'batcher', label: 'Telemetry Batcher', port: 3041 },
+        { name: 'pubsub-broadcaster', port: 3020 },
       ],
     });
 
@@ -34,27 +37,122 @@ describe('renderStatusPage', () => {
     expect(html).toContain('data-port="3000"');
     expect(html).toContain('data-service="batcher"');
     expect(html).toContain('data-port="3041"');
-    expect(html).toContain('data-service="registry-sync"');
-    expect(html).toContain('data-port="3011"');
+    expect(html).toContain('data-service="pubsub-broadcaster"');
+    expect(html).toContain('data-port="3020"');
   });
 
-  it('embeds a client-side script that polls /health and refreshes on an interval', () => {
+  it('shows only Service and Status columns (no Port or Latency)', () => {
     const html = renderStatusPage({
       selfPort: 3000,
-      host: 'localhost',
+      targets: [{ name: 'batcher', label: 'Telemetry Batcher', port: 3041 }],
+    });
+
+    expect(html).toContain('<tr><th>Service</th><th>Status</th></tr>');
+    expect(html).not.toContain('<th>Port</th>');
+    expect(html).not.toContain('<th>Latency</th>');
+    expect(html).not.toContain('<td>3041</td>');
+    expect(html).not.toMatch(/latency/i);
+  });
+
+  it('shows descriptive service labels with the technical name as a secondary hint', () => {
+    const html = renderStatusPage({
+      selfPort: 3000,
+      targets: [
+        { name: 'batcher', label: 'Telemetry Batcher', port: 3041 },
+        { name: 'pubsub-broadcaster', port: 3020 },
+      ],
+    });
+
+    expect(html).toContain(
+      'Telemetry Ingress API<span class="service-id">endpoint</span>'
+    );
+    expect(html).toContain(
+      'Telemetry Batcher<span class="service-id">batcher</span>'
+    );
+    // Falls back to the technical name when no label is configured.
+    expect(html).toContain(
+      'pubsub-broadcaster<span class="service-id">pubsub-broadcaster</span>'
+    );
+  });
+
+  it('inlines the Robonomics logo with light and dark mode variants', () => {
+    const html = renderStatusPage({ selfPort: 3000, targets: [] });
+
+    expect(html).toContain(STATUS_LOGO_LIGHT_SVG);
+    expect(html).toContain(STATUS_LOGO_DARK_SVG);
+    expect(STATUS_LOGO_LIGHT_SVG).toContain('class="logo logo-light"');
+    expect(STATUS_LOGO_LIGHT_SVG).toContain('fill="black"');
+    expect(STATUS_LOGO_DARK_SVG).toContain('class="logo logo-dark"');
+    expect(STATUS_LOGO_DARK_SVG).toContain('fill="white"');
+    expect(html).toMatch(
+      /@media \(prefers-color-scheme: dark\) \{[^}]*\}[\s\S]*\.logo-light \{ display: none; \}\s*\.logo-dark \{ display: block; \}/
+    );
+    // Self-contained: no external image requests.
+    expect(html).not.toMatch(/<img|https?:\/\/robonomics\.network/);
+  });
+
+  it('embeds a client-side script that polls /health using the browser hostname and refreshes on an interval', () => {
+    const html = renderStatusPage({
+      selfPort: 3000,
       targets: [],
     });
 
     expect(html).toContain('<script>');
+    expect(html).toContain('var HOST = window.location.hostname;');
     expect(html).toContain("fetch('http://' + HOST + ':' + port + '/health'");
     expect(html).toContain('setInterval(refresh, REFRESH_MS)');
-    expect(html).toContain('"localhost"');
+  });
+
+  it('renders a metrics section for configured metric targets', () => {
+    const html = renderStatusPage({
+      selfPort: 3000,
+      targets: [],
+      metrics: [
+        {
+          label: 'Online sensors',
+          service: 'heartbeat-tracker',
+          port: 3030,
+          field: 'sensors_online',
+        },
+        {
+          label: 'libp2p peers',
+          service: 'pubsub-broadcaster',
+          port: 3020,
+          field: 'connectedPeerCount',
+        },
+        {
+          label: 'Anchored messages',
+          service: 'blockchain-anchor',
+          port: 3050,
+          field: 'anchored',
+        },
+      ],
+    });
+
+    expect(html).toContain('<h2>Metrics</h2>');
+    expect(html).toContain(
+      'data-service="heartbeat-tracker" data-port="3030" data-field="sensors_online"'
+    );
+    expect(html).toContain('Online sensors');
+    expect(html).toContain(
+      'data-service="pubsub-broadcaster" data-port="3020" data-field="connectedPeerCount"'
+    );
+    expect(html).toContain('libp2p peers');
+    expect(html).toContain(
+      'data-service="blockchain-anchor" data-port="3050" data-field="anchored"'
+    );
+    expect(html).toContain('Anchored messages');
+    expect(html).toContain("fetch('http://' + HOST + ':' + port + '/metrics'");
+  });
+
+  it('omits the metrics section entirely when no metrics are configured', () => {
+    const html = renderStatusPage({ selfPort: 3000, targets: [] });
+    expect(html).not.toContain('<h2>Metrics</h2>');
   });
 
   it('renders identical markup on every call given the same options (fully static)', () => {
     const options = {
       selfPort: 3000,
-      host: 'localhost',
       targets: [{ name: 'batcher', port: 3041 }],
     };
     expect(renderStatusPage(options)).toBe(renderStatusPage(options));
@@ -77,7 +175,6 @@ describe('GET / status page route', () => {
       },
       {
         statusPort: 3000,
-        statusHost: 'localhost',
         statusTargets: [{ name: 'batcher', port: 3041 }],
       }
     );

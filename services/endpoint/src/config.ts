@@ -14,8 +14,22 @@
  * limitations under the License.
  */
 export interface StatusTargetConfig {
+  /** Technical service identifier (e.g. `batcher`). */
   name: string;
+  /** Descriptive name shown on the status page; defaults to `name`. */
+  label?: string;
   port: number;
+}
+
+export interface StatusMetricConfig {
+  /** Human-readable label shown on the status page. */
+  label: string;
+  /** Service name, used for display and to match a `statusTargets` port. */
+  service: string;
+  /** Port to fetch `/metrics` from. */
+  port: number;
+  /** Field name to read from the service's `/metrics` JSON response. */
+  field: string;
 }
 
 export interface EndpointConfig {
@@ -23,10 +37,10 @@ export interface EndpointConfig {
   source: string;
   kafkaBrokers: string[];
   timestampSkewSeconds: number;
-  /** Host used to reach sibling services' health ports for the status page. */
-  statusHost: string;
   /** Sibling services (with their default ports) shown on the status page. */
   statusTargets: StatusTargetConfig[];
+  /** Simple headline metrics (sourced from sibling services) shown on the status page. */
+  statusMetrics: StatusMetricConfig[];
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -44,6 +58,19 @@ function parseCsv(value: string | undefined, fallback: string): string[] {
 export function loadEndpointConfig(
   env: NodeJS.ProcessEnv = process.env
 ): EndpointConfig {
+  const pubsubBroadcasterPort = parsePositiveInt(
+    env.PUBSUB_BROADCASTER_HEALTH_PORT,
+    3020
+  );
+  const heartbeatTrackerPort = parsePositiveInt(
+    env.HEARTBEAT_TRACKER_HEALTH_PORT,
+    3030
+  );
+  const blockchainAnchorPort = parsePositiveInt(
+    env.BLOCKCHAIN_ANCHOR_HEALTH_PORT,
+    3050
+  );
+
   return {
     // Cloud Run injects the listening port via `PORT`; prefer it over the
     // service-specific `ENDPOINT_PORT`, which remains as a fallback for
@@ -55,27 +82,46 @@ export function loadEndpointConfig(
       env.ENDPOINT_TIMESTAMP_SKEW_SECONDS,
       300
     ),
-    statusHost: env.STATUS_PAGE_HOST ?? 'localhost',
     statusTargets: [
       {
-        name: 'registry-sync',
-        port: parsePositiveInt(env.REGISTRY_SYNC_HEALTH_PORT, 3011),
-      },
-      {
         name: 'pubsub-broadcaster',
-        port: parsePositiveInt(env.PUBSUB_BROADCASTER_HEALTH_PORT, 3020),
+        label: 'Live Telemetry Broadcast (libp2p)',
+        port: pubsubBroadcasterPort,
       },
       {
         name: 'heartbeat-tracker',
-        port: parsePositiveInt(env.HEARTBEAT_TRACKER_HEALTH_PORT, 3030),
+        label: 'Sensor Heartbeat Tracker',
+        port: heartbeatTrackerPort,
       },
       {
         name: 'batcher',
+        label: 'Telemetry Batcher',
         port: parsePositiveInt(env.BATCHER_HEALTH_PORT, 3041),
       },
       {
         name: 'blockchain-anchor',
-        port: parsePositiveInt(env.BLOCKCHAIN_ANCHOR_HEALTH_PORT, 3050),
+        label: 'Robonomics Blockchain Anchor',
+        port: blockchainAnchorPort,
+      },
+    ],
+    statusMetrics: [
+      {
+        label: 'Online sensors',
+        service: 'heartbeat-tracker',
+        port: heartbeatTrackerPort,
+        field: 'sensors_online',
+      },
+      {
+        label: 'libp2p peers',
+        service: 'pubsub-broadcaster',
+        port: pubsubBroadcasterPort,
+        field: 'connectedPeerCount',
+      },
+      {
+        label: 'Anchored messages',
+        service: 'blockchain-anchor',
+        port: blockchainAnchorPort,
+        field: 'anchored',
       },
     ],
   };

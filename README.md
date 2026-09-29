@@ -32,7 +32,6 @@ This will:
 ```text
 packages/contracts         # @scp/core - shared schemas, types, validation, consumer runtime
 services/endpoint          # POST /v1/telemetry ingress - protobuf validation, signature verification
-services/registry-sync     # Robonomics blockchain→Redis projection sync service
 services/whitelist         # Whitelist-based sensor authentication provider
 services/pubsub-broadcaster # Kafka→libp2p GossipSub bridge for real-time web UI
 services/heartbeat-tracker  # Observability: sensor liveness & uptime metrics
@@ -89,9 +88,8 @@ Use `REJECTION_CODES` from `@scp/core` to reference these codes in your code:
 
 ## Service overview
 
-- **endpoint**: Validates `POST /v1/telemetry` (protobuf `crypto.v1.SignedEnvelope`), verifies Ed25519 signatures, checks sensor authorization via Redis projection, publishes `telemetry.authorized.v1` and `telemetry.rejected.v1`, returns `202` only after Kafka ACK. Supports pluggable authentication strategies (registry-sync or whitelist).
-- **registry-sync**: Consumes finalized Robonomics blockchain events, projects sensor/key authorization state to Redis for endpoint lookups.
-- **whitelist**: Alternative authentication provider - maintains static sensor whitelist in Redis, bypassing blockchain dependency for simpler deployments.
+- **endpoint**: Validates `POST /v1/telemetry` (protobuf `crypto.v1.SignedEnvelope`), verifies Ed25519 signatures, checks sensor authorization (whitelist or none strategy), publishes `telemetry.authorized.v1` and `telemetry.rejected.v1`, returns `202` only after Kafka ACK. Supports pluggable authentication strategies (`whitelist` or `none`).
+- **whitelist**: Static, in-memory sensor allowlist (`WHITELIST_SENSOR_IDS`) used by the endpoint's `whitelist` strategy.
 - **pubsub-broadcaster**: Consumes `telemetry.authorized.v1`, publishes to libp2p/GossipSub for real-time web UI, emits `telemetry.pubsub.result.v1`, routes exhausted failures to DLQ.
 - **heartbeat-tracker**: Observability-only consumer of `telemetry.authorized.v1`, tracks sensor liveness (`firstSeen`, `lastSeen`, `onlineSince`) in Redis, exposes `sensors_online` count and per-sensor/aggregate uptime metrics over configurable online window (default 30s). Does not emit result events or participate in retry/DLQ.
 - **batcher**: Consumes `telemetry.authorized.v1`, groups events into deterministic batches (by size, lag, and a bounded flush timer), XZ-compresses and splits each batch to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`. Serializes flushes (single active flush per instance) and flushes pending batches on graceful shutdown.
