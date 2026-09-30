@@ -6,7 +6,7 @@ Consumes chain-ready compressed telemetry batches from Kafka and anchors them to
 
 This service:
 1. Subscribes to `telemetry.batched.v1` Kafka topic
-2. Extracts the XZ-compressed batch payload bytes from each event
+2. Extracts the zstd-compressed batch payload bytes from each event
 3. Defensively rejects (as a permanent error, offset committed) any payload
    larger than `ANCHOR_MAX_PAYLOAD_BYTES` — the batcher is expected to have
    already split batches to fit this limit, so this should only trigger on a
@@ -69,7 +69,7 @@ The service interacts with the Robonomics CPS pallet, which provides hierarchica
 - **Metadata**: Configuration data (set once, rarely changed)
 - **Payload**: Operational data (updated frequently)
 
-This service uses `setPayload` to update a specific node's operational data with the XZ-compressed telemetry batch bytes.
+This service uses `setPayload` to update a specific node's operational data with the zstd-compressed telemetry batch bytes.
 
 ### Extrinsic Format
 
@@ -77,7 +77,7 @@ This service uses `setPayload` to update a specific node's operational data with
 api.tx.cps.setPayload(node_id: u64, payload: Option<BoundedVec<u8>>)
 ```
 
-The payload bytes are the raw XZ-compressed batch produced by the batcher
+The payload bytes are the raw zstd-compressed batch produced by the batcher
 service, submitted unmodified (no reserialization or recompression).
 
 ## Usage

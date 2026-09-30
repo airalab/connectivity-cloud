@@ -39,7 +39,7 @@ This is an **event-driven telemetry pipeline** with Kafka as the central durable
 4. Multiple **downstream consumers** process authorized events independently:
    - **pubsub-broadcaster**: Publishes to libp2p/GossipSub for real-time web UI
    - **heartbeat-tracker**: Tracks sensor liveness/uptime metrics (observability-only, no DLQ)
-   - **batcher**: Batches authorized telemetry, XZ-compresses and splits it to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`
+   - **batcher**: Batches authorized telemetry, zstd-compresses and splits it to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`
 5. **batcher** → **blockchain-anchor** publication chain:
    - **blockchain-anchor**: Consumes `telemetry.batched.v1`, submits the compressed payload via `cps.setPayload` to anchor it on the Robonomics blockchain, deduplicating by comparing against the current on-chain payload
 
@@ -59,7 +59,7 @@ SENSOR_AUTH_STRATEGY (whitelist | none) → endpoint (in-memory lookup during va
 ### Core Kafka Topics
 - `telemetry.authorized.v1` - Successfully validated telemetry
 - `telemetry.rejected.v1` - Failed validation (signature/timestamp/auth)
-- `telemetry.batched.v1` - XZ-compressed, chain-ready batched telemetry (submitted directly via `cps.setPayload`)
+- `telemetry.batched.v1` - zstd-compressed, chain-ready batched telemetry (submitted directly via `cps.setPayload`)
 - `telemetry.blockchain.result.v1` - Blockchain anchoring results
 - `telemetry.retry.v1` - Transient failures for retry
 - `telemetry.dlq.v1` - Exhausted retries (dead letters)
@@ -70,7 +70,7 @@ SENSOR_AUTH_STRATEGY (whitelist | none) → endpoint (in-memory lookup during va
 - `services/whitelist` - Whitelist-based sensor auth provider
 - `services/pubsub-broadcaster` - Kafka→libp2p GossipSub bridge
 - `services/heartbeat-tracker` - Observability metrics (online sensors, uptime)
-- `services/batcher` - Kafka batcher (authorized → XZ-compressed, size-fitted `telemetry.batched.v1`)
+- `services/batcher` - Kafka batcher (authorized → zstd-compressed, size-fitted `telemetry.batched.v1`)
 - `services/blockchain-anchor` - Anchors compressed batch payloads to the Robonomics CPS pallet via `cps.setPayload`
 - `tools/fake-sensor-cli` - Generate test telemetry with Ed25519 signatures
 

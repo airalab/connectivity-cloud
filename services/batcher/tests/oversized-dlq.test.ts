@@ -20,6 +20,7 @@ import {
 } from '@scp/core';
 import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { create, toBinary } from '@bufbuild/protobuf';
+import { randomBytes } from 'node:crypto';
 import type { Consumer, Producer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
 import { createBatcherService } from '../src/index.js';
@@ -53,7 +54,7 @@ function createAuthorizedMessage(
   const signedEnvelope = create(SignedEnvelopeSchema, {
     sensorId: Buffer.alloc(32, 1),
     nonce: Buffer.alloc(16, 2),
-    message: Buffer.alloc(messageSize, 9),
+    message: randomBytes(messageSize),
     signature: Buffer.alloc(64, 3),
   });
 

@@ -55,7 +55,7 @@ function createAuthorizedMessage(
   const signedEnvelope = create(SignedEnvelopeSchema, {
     sensorId: Buffer.alloc(32, 1),
     nonce: Buffer.alloc(16, 2),
-    // High-entropy payload so XZ cannot meaningfully compress it, forcing the
+    // High-entropy payload so zstd cannot meaningfully compress it, forcing the
     // combined batch above the payload limit and requiring a split.
     message: randomBytes(1000),
     signature: Buffer.alloc(64, 3),

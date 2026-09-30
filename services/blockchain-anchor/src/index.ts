@@ -99,7 +99,7 @@ async function getAnchoredPayload(
     }
 
     // `toU8a()` defaults to including the SCALE compact-length prefix used
-    // to encode `BoundedVec<u8>`, but `payload.payload` is just the bare XZ
+    // to encode `BoundedVec<u8>`, but `payload.payload` is just the bare zstd
     // bytes. Pass `true` to strip the length prefix so the comparison is
     // byte-for-byte against the same shape we submit.
     return raw.unwrap().toU8a(true);

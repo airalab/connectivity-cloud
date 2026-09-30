@@ -23,7 +23,7 @@ Sensor -> Endpoint -> Kafka -> {PubSub Broadcaster, Batcher -> Blockchain Anchor
 | [WP-02](./wp-02-endpoint.md) | `endpoint` (`POST /v1/telemetry` ingress) | WP-00 | Implemented (pending formal DoD sign-off) |
 | [WP-03](./wp-03-pubsub-broadcaster.md) | `pubsub-broadcaster` (GossipSub fan-out) | WP-00, WP-02 | Implemented |
 | WP-03A | `heartbeat-tracker` (trusted-event liveness & uptime observability) | WP-00, WP-02 | Implemented |
-| [WP-04](./wp-04-ipfs-publisher.md) | `@scp/batcher` (batch, XZ-compress, size-fit) | WP-00, WP-02 | Implemented (superseded `ipfs-publisher`, see note in doc) |
+| [WP-04](./wp-04-ipfs-publisher.md) | `@scp/batcher` (batch, zstd-compress, size-fit) | WP-00, WP-02 | Implemented (superseded `ipfs-publisher`, see note in doc) |
 | [WP-05](./wp-05-blockchain-anchor.md) | `blockchain-anchor` (anchors compressed batch payloads via `cps.setPayload`) | WP-00, WP-04 | Implemented |
 
 ## Recommended sequencing

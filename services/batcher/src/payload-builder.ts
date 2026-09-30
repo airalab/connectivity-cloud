@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 import { toBinary, create } from '@bufbuild/protobuf';
-import { xz } from '@napi-rs/lzma';
+import { promisify } from 'node:util';
+import { constants, zstdCompress } from 'node:zlib';
 import { blake2AsU8a } from '@polkadot/util-crypto';
 import {
   SignedEnvelopeBatchSchema,
@@ -23,7 +24,7 @@ import {
 
 /**
  * Error describing a single event that does not fit within
- * `ANCHOR_MAX_PAYLOAD_BYTES` even after serialization and XZ compression on
+ * `ANCHOR_MAX_PAYLOAD_BYTES` even after serialization and zstd compression on
  * its own. This cannot be resolved by further splitting and must be treated
  * as a permanent validation error (e.g. routed to the DLQ), not retried as a
  * transient failure.
@@ -50,7 +51,7 @@ export interface FittedItem {
 export interface FittedBatch<T extends FittedItem> {
   /** The events contained in this sub-batch, in original order. */
   events: readonly T[];
-  /** XZ(serialized SignedEnvelopeBatch) — exactly the bytes for `set_payload`. */
+  /** zstd(serialized SignedEnvelopeBatch) — exactly the bytes for `set_payload`. */
   payload: Uint8Array;
   /** Size of the serialized batch before compression. */
   uncompressedSize: number;
@@ -73,7 +74,19 @@ export interface FitBatchOutcome<T extends FittedItem> {
   oversized: OversizedItem<T>[];
 }
 
-/** Serialize a set of signed envelopes into a `SignedEnvelopeBatch` and XZ compress it. */
+const zstdCompressAsync = promisify(zstdCompress);
+
+/** Zstandard compression level; higher is smaller, output remains a standard zstd frame. */
+const ZSTD_COMPRESSION_LEVEL = 19;
+
+/** Compress bytes into a single standard zstd frame. */
+async function compressZstd(input: Uint8Array): Promise<Uint8Array> {
+  return zstdCompressAsync(input, {
+    params: { [constants.ZSTD_c_compressionLevel]: ZSTD_COMPRESSION_LEVEL },
+  });
+}
+
+/** Serialize a set of signed envelopes into a `SignedEnvelopeBatch` and zstd compress it. */
 async function serializeAndCompress<T extends FittedItem>(
   events: readonly T[]
 ): Promise<{ uncompressed: Uint8Array; compressed: Uint8Array }> {
@@ -81,7 +94,7 @@ async function serializeAndCompress<T extends FittedItem>(
     batch: events.map((e) => e.signedEnvelope),
   });
   const uncompressed = toBinary(SignedEnvelopeBatchSchema, batch);
-  const compressed = await xz.compress(uncompressed);
+  const compressed = await compressZstd(uncompressed);
   return { uncompressed, compressed };
 }
 

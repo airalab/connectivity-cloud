@@ -2,7 +2,7 @@
 
 > **Updated (issue #34):** The IPFS anchoring stage has been removed.
 > `blockchain-anchor` now consumes `telemetry.batched.v1` directly from
-> `@scp/batcher` and submits the already XZ-compressed, size-fitted payload
+> `@scp/batcher` and submits the already zstd-compressed, size-fitted payload
 > bytes on-chain via `cps.setPayload`. There is no CID or IPFS publication
 > step; idempotency is based on comparing the current on-chain payload
 > bytes against the incoming payload.
@@ -28,7 +28,7 @@ Implement `blockchain-anchor` to consume `telemetry.batched.v1`, submit the comp
 ### Inputs
 - Kafka topic consumed: `telemetry.batched.v1` payload fields:
   - `batch_id`
-  - `payload` (XZ-compressed, chain-ready bytes; must be `<= ANCHOR_MAX_PAYLOAD_BYTES`)
+  - `payload` (zstd-compressed, chain-ready bytes; must be `<= ANCHOR_MAX_PAYLOAD_BYTES`)
   - `uncompressed_size`, `compressed_size`, `payload_hash`
   - `event_count`, `sensor_ids`
 - Shared envelope/contracts from WP-00.

@@ -35,7 +35,7 @@ services/endpoint          # POST /v1/telemetry ingress - protobuf validation, s
 services/whitelist         # Whitelist-based sensor authentication provider
 services/pubsub-broadcaster # Kafka→libp2p GossipSub bridge for real-time web UI
 services/heartbeat-tracker  # Observability: sensor liveness & uptime metrics
-services/batcher           # Kafka: batches, compresses (XZ), and splits telemetry into telemetry.batched.v1
+services/batcher           # Kafka: batches, compresses (zstd), and splits telemetry into telemetry.batched.v1
 services/blockchain-anchor # Anchors chain-ready compressed batches to the Robonomics CPS pallet
 tools/fake-sensor-cli      # Generate test telemetry with Ed25519 signatures
 ```
@@ -92,5 +92,5 @@ Use `REJECTION_CODES` from `@scp/core` to reference these codes in your code:
 - **whitelist**: Static, in-memory sensor allowlist (`WHITELIST_SENSOR_IDS`) used by the endpoint's `whitelist` strategy.
 - **pubsub-broadcaster**: Consumes `telemetry.authorized.v1`, publishes to libp2p/GossipSub for real-time web UI, emits `telemetry.pubsub.result.v1`, routes exhausted failures to DLQ.
 - **heartbeat-tracker**: Observability-only consumer of `telemetry.authorized.v1`, tracks sensor liveness (`firstSeen`, `lastSeen`, `onlineSince`) in Redis, exposes `sensors_online` count and per-sensor/aggregate uptime metrics over configurable online window (default 30s). Does not emit result events or participate in retry/DLQ.
-- **batcher**: Consumes `telemetry.authorized.v1`, groups events into deterministic batches (by size, lag, and a bounded flush timer), XZ-compresses and splits each batch to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`. Serializes flushes (single active flush per instance) and flushes pending batches on graceful shutdown.
+- **batcher**: Consumes `telemetry.authorized.v1`, groups events into deterministic batches (by size, lag, and a bounded flush timer), zstd-compresses and splits each batch to fit `ANCHOR_MAX_PAYLOAD_BYTES`, and emits `telemetry.batched.v1`. Serializes flushes (single active flush per instance) and flushes pending batches on graceful shutdown.
 - **blockchain-anchor**: Consumes `telemetry.batched.v1` and anchors the compressed payload bytes to the Robonomics blockchain via `cps.setPayload`, deduplicating by comparing against the current on-chain payload.

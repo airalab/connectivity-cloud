@@ -1,7 +1,7 @@
 # WP-04 — `ipfs-publisher`
 
 > **Superseded (issue #34):** The `ipfs-publisher` service has been removed.
-> `@scp/batcher` now XZ-compresses and size-fits batches directly, emitting
+> `@scp/batcher` now zstd-compresses and size-fits batches directly, emitting
 > chain-ready payloads on `telemetry.batched.v1` for `blockchain-anchor` to
 > submit via `cps.setPayload`. There is no longer an IPFS publication stage
 > in the pipeline. This document is kept for historical context only; see

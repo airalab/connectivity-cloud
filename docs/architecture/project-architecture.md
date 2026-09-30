@@ -71,7 +71,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 ### Batcher
 - Consumes authorized events from `telemetry.authorized.v1`.
 - Groups events into deterministic batches by size, consumer lag, and a bounded flush timer.
-- Serializes each batch as a `crypto.v1.SignedEnvelopeBatch`, XZ-compresses it, and recursively splits it into smaller sub-batches if the compressed result exceeds `ANCHOR_MAX_PAYLOAD_BYTES`.
+- Serializes each batch as a `crypto.v1.SignedEnvelopeBatch`, zstd-compresses it, and recursively splits it into smaller sub-batches if the compressed result exceeds `ANCHOR_MAX_PAYLOAD_BYTES`.
 - Emits one `telemetry.batched.v1` message per fitted sub-batch, each carrying the compressed payload, its size/hash fields, and its own `batch_id`.
 - Routes single events that cannot fit even alone to `telemetry.dlq.v1` without blocking the rest of the batch.
 - Serializes flushes (single active flush per instance) so a timer-triggered flush cannot publish the same batch as a size/lag-triggered flush.

@@ -144,7 +144,7 @@ async function publishPoisonToDlq(
 }
 
 /**
- * Publish events whose serialized + XZ compressed size exceeds
+ * Publish events whose serialized + zstd compressed size exceeds
  * `ANCHOR_MAX_PAYLOAD_BYTES` even on their own, to the DLQ topic. This is a
  * permanent validation error (`ANCHOR_PAYLOAD_TOO_LARGE`), not a transient
  * blockchain/produce failure, so it must not be retried indefinitely.
@@ -188,7 +188,7 @@ async function publishOversizedToDlq(
  * Serialize a batch of authorized telemetry into one or more
  * `telemetry.batched.v1` envelopes and produce them to Kafka.
  *
- * The batch is serialized, XZ compressed, and (if the compressed result
+ * The batch is serialized, zstd compressed, and (if the compressed result
  * exceeds `config.maxPayloadBytes`) recursively split so that every emitted
  * payload fits `CPS.set_payload`. Events that cannot fit even on their own
  * are routed to the DLQ as a permanent `ANCHOR_PAYLOAD_TOO_LARGE` error.

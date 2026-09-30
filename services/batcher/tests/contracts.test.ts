@@ -24,9 +24,13 @@ import {
   SignedEnvelopeBatchSchema,
 } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
-import { xz } from '@napi-rs/lzma';
+import { promisify } from 'node:util';
+import { zstdCompress, zstdDecompress } from 'node:zlib';
 import { blake2AsU8a } from '@polkadot/util-crypto';
 import { describe, expect, it } from 'vitest';
+
+const zstdCompressAsync = promisify(zstdCompress);
+const zstdDecompressAsync = promisify(zstdDecompress);
 
 describe('batcher contract compatibility', () => {
   it('accepts telemetry.authorized.v1 envelope/payload as input', () => {
@@ -75,7 +79,7 @@ describe('batcher contract compatibility', () => {
       batch: [signedEnvelope1, signedEnvelope2],
     });
     const uncompressed = toBinary(SignedEnvelopeBatchSchema, batch);
-    const compressed = await xz.compress(uncompressed);
+    const compressed = await zstdCompressAsync(uncompressed);
 
     const batchedPayload = create(TelemetryBatchedPayloadSchema, {
       batchId: 'batch-1',
@@ -112,9 +116,9 @@ describe('batcher contract compatibility', () => {
     expect(payloadParsed.sensorIds).toHaveLength(2);
     expect(payloadParsed.compressedSize).toBeLessThanOrEqual(8192);
 
-    // The carried payload is exactly XZ(serialized SignedEnvelopeBatch); it
+    // The carried payload is exactly zstd(serialized SignedEnvelopeBatch); it
     // round-trips (decompress -> parse) intact with no extra framing.
-    const decompressed = await xz.decompress(payloadParsed.payload);
+    const decompressed = await zstdDecompressAsync(payloadParsed.payload);
     const innerBatch = fromBinary(SignedEnvelopeBatchSchema, decompressed);
     expect(innerBatch.batch).toHaveLength(2);
     expect(Buffer.from(innerBatch.batch[0]?.sensorId ?? [])).toEqual(

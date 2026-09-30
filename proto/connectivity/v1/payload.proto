@@ -25,7 +25,7 @@ message TelemetryRejectedPayload {
 
 // TelemetryBatchedPayload carries a chain-ready batch of authorized telemetry.
 // It is emitted by the batcher and consumed directly by blockchain-anchor.
-// `payload` is the exact byte sequence passed to CPS.set_payload: an XZ
+// `payload` is the exact byte sequence passed to CPS.set_payload: a zstd
 // compressed, serialized crypto.v1.SignedEnvelopeBatch with no additional
 // framing. Payload interpretation (schema/encoding/compression) is described
 // through CPS metadata, not through bytes embedded in the payload itself.
@@ -33,7 +33,7 @@ message TelemetryBatchedPayload {
   // Unique batch identifier (logical batch identity, used for deduplication)
   string batch_id = 1;
 
-  // Chain-ready payload: XZ(serialized crypto.v1.SignedEnvelopeBatch).
+  // Chain-ready payload: zstd(serialized crypto.v1.SignedEnvelopeBatch).
   // This is exactly the byte sequence passed to CPS.set_payload.
   bytes payload = 2;
 

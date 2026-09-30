@@ -8,13 +8,13 @@ anchoring.
 
 - **Pattern**: Standard consumer with manual commit
 - **Input**: `telemetry.authorized.v1` from Kafka
-- **Output**: `telemetry.batched.v1` (carries an XZ-compressed, chain-ready payload)
+- **Output**: `telemetry.batched.v1` (carries a zstd-compressed, chain-ready payload)
 - **Autocommit**: Disabled (commit only after the batch is durably produced)
 - **Concurrency**: Single active flush per instance (single-flight); a timer-triggered flush cannot publish the same batch as a size/lag-triggered flush
 - **Shutdown**: Waits for any in-flight flush and flushes the remaining batch before closing resources
 
 The batcher serializes each detached batch as a `SignedEnvelopeBatch`
-protobuf, XZ-compresses it, and — if the compressed result exceeds
+protobuf, zstd-compresses it, and — if the compressed result exceeds
 `ANCHOR_MAX_PAYLOAD_BYTES` — recursively splits it into smaller sub-batches
 until every emitted payload fits. Each sub-batch becomes its own
 `telemetry.batched.v1` message with its own `batch_id`. A single event whose
@@ -61,7 +61,7 @@ Available at `http://localhost:3041/metrics`:
 1. Consume `telemetry.authorized.v1` event from Kafka
 2. Extract `SignedEnvelope` from payload and add to the current batch
 3. When the batch is full, lag is high, or the flush timer fires:
-   - Serialize the batch as a `SignedEnvelopeBatch` protobuf and XZ-compress it
+   - Serialize the batch as a `SignedEnvelopeBatch` protobuf and zstd-compress it
    - If the compressed payload exceeds `ANCHOR_MAX_PAYLOAD_BYTES`, recursively split the batch until every sub-batch fits (oversized single events go to the DLQ)
    - Wrap each fitted sub-batch in a `TelemetryBatchedPayload` (`batch_id`, `payload`, `uncompressed_size`, `compressed_size`, `payload_hash`, `event_count`, `sensor_ids`)
    - Produce one `telemetry.batched.v1` envelope per sub-batch to Kafka
@@ -74,7 +74,7 @@ Published to `telemetry.batched.v1`:
 ```typescript
 {
   batchId: string;              // Unique batch identifier (per sub-batch)
-  payload: Uint8Array;          // XZ-compressed, chain-ready crypto.v1.SignedEnvelopeBatch
+  payload: Uint8Array;          // zstd-compressed, chain-ready crypto.v1.SignedEnvelopeBatch
   uncompressedSize: number;     // Size of the serialized batch before compression
   compressedSize: number;       // Size of `payload` (<= ANCHOR_MAX_PAYLOAD_BYTES)
   payloadHash: Uint8Array;      // blake2_256 hash of `payload`

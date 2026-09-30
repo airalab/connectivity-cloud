@@ -16,7 +16,8 @@
 import { describe, expect, it } from 'vitest';
 import { create } from '@bufbuild/protobuf';
 import { randomBytes } from 'node:crypto';
-import { xz } from '@napi-rs/lzma';
+import { promisify } from 'node:util';
+import { zstdDecompress } from 'node:zlib';
 import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import {
   fitBatch,
@@ -25,13 +26,14 @@ import {
 } from '../src/payload-builder.js';
 
 const MAX_PAYLOAD_BYTES = 8192;
+const zstdDecompressAsync = promisify(zstdDecompress);
 
 /** Build a fake batch item carrying a signed envelope with a message of `size` bytes. */
 function makeItem(index: number, size: number): FittedItem {
   const signedEnvelope = create(SignedEnvelopeSchema, {
     sensorId: Buffer.alloc(32, index % 256),
     nonce: Buffer.alloc(16, index % 256),
-    // High-entropy content so XZ cannot meaningfully compress it away,
+    // High-entropy content so zstd cannot meaningfully compress it away,
     // making `size` a reliable proxy for compressed size in tests.
     message: randomBytes(size),
     signature: Buffer.alloc(64, (index + 1) % 256),
@@ -66,7 +68,7 @@ describe('fitBatch', () => {
   });
 
   it('splits an oversized batch into multiple valid sub-batches', async () => {
-    // Large, high-entropy messages that XZ cannot meaningfully compress,
+    // Large, high-entropy messages that zstd cannot meaningfully compress,
     // forcing the combined batch above the payload limit.
     const events = Array.from({ length: 20 }, (_, i) => makeItem(i, 1000));
     const { batches, oversized } = await fitBatch(events, MAX_PAYLOAD_BYTES);
@@ -127,12 +129,12 @@ describe('fitBatch', () => {
     expect(flattenedFitted).toEqual([events[0], events[2]]);
   });
 
-  it('produces a payload that is exactly XZ(serialized batch), decompressible back to the original bytes', async () => {
+  it('produces a payload that is exactly zstd(serialized batch), decompressible back to the original bytes', async () => {
     const events = [makeItem(0, 30), makeItem(1, 30)];
     const { batches } = await fitBatch(events, MAX_PAYLOAD_BYTES);
     const fitted = batches[0]!;
 
-    const decompressed = await xz.decompress(fitted.payload);
+    const decompressed = await zstdDecompressAsync(fitted.payload);
     expect(decompressed.length).toBe(fitted.uncompressedSize);
   });
 
