@@ -158,8 +158,8 @@ importers:
   packages/core:
     dependencies:
       '@buf/airalab_connectivity-protocol.bufbuild_es':
-        specifier: 2.14.0-20260917143433-6f6f1eba1cc0.2
-        version: 2.14.0-20260917143433-6f6f1eba1cc0.2(@bufbuild/protobuf@2.14.0)
+        specifier: 2.16.0-20261001150442-e61ecb9858dc.1
+        version: 2.16.0-20261001150442-e61ecb9858dc.1(@bufbuild/protobuf@2.14.0)
       '@bufbuild/protobuf':
         specifier: ^2.14.0
         version: 2.14.0
@@ -174,8 +174,8 @@ importers:
   services/batcher:
     dependencies:
       '@buf/airalab_connectivity-protocol.bufbuild_es':
-        specifier: 2.14.0-20260917143433-6f6f1eba1cc0.2
-        version: 2.14.0-20260917143433-6f6f1eba1cc0.2(@bufbuild/protobuf@2.14.0)
+        specifier: 2.16.0-20261001150442-e61ecb9858dc.1
+        version: 2.16.0-20261001150442-e61ecb9858dc.1(@bufbuild/protobuf@2.14.0)
       '@platformatic/kafka':
         specifier: ^2.9.0
         version: 2.9.0(supports-color@10.2.2)
@@ -249,8 +249,8 @@ importers:
         version: 10.3.1
     devDependencies:
       '@buf/airalab_connectivity-protocol.bufbuild_es':
-        specifier: 2.14.0-20260917143433-6f6f1eba1cc0.2
-        version: 2.14.0-20260917143433-6f6f1eba1cc0.2(@bufbuild/protobuf@2.14.0)
+        specifier: 2.16.0-20261001150442-e61ecb9858dc.1
+        version: 2.16.0-20261001150442-e61ecb9858dc.1(@bufbuild/protobuf@2.14.0)
       '@bufbuild/protobuf':
         specifier: ^2.14.0
         version: 2.14.0
@@ -366,8 +366,8 @@ importers:
   tools/fake-sensor-cli:
     dependencies:
       '@buf/airalab_connectivity-protocol.bufbuild_es':
-        specifier: 2.14.0-20260917143433-6f6f1eba1cc0.2
-        version: 2.14.0-20260917143433-6f6f1eba1cc0.2(@bufbuild/protobuf@2.14.0)
+        specifier: 2.16.0-20261001150442-e61ecb9858dc.1
+        version: 2.16.0-20261001150442-e61ecb9858dc.1(@bufbuild/protobuf@2.14.0)
       '@bufbuild/protobuf':
         specifier: ^2.14.0
         version: 2.14.0
@@ -390,10 +390,10 @@ importers:
 
 packages:
 
-  '@buf/airalab_connectivity-protocol.bufbuild_es@2.14.0-20260917143433-6f6f1eba1cc0.2':
-    resolution: {integrity: sha512-IYbZP8JvGNVpgHbf93cKe2KNwPzBhVs2sKz3qbCS5xHjVIIv1XXqPNbSb5YHa0M9fOTe/nulV9rruSSJt9oL0g==}
+  '@buf/airalab_connectivity-protocol.bufbuild_es@2.16.0-20261001150442-e61ecb9858dc.1':
+    resolution: {integrity: sha512-Dvnu2zu1KRUL/pzkNf6MWquP5IoO9MYAQwTvKgmrwZO60MVAC/Nt7o8UGd6E+59HG+Ly06v7j/VUyMqEFcKAMQ==}
     peerDependencies:
-      '@bufbuild/protobuf': ^2.14.0
+      '@bufbuild/protobuf': ^2.16.0
 
   '@bufbuild/buf-darwin-arm64@1.73.0':
     resolution: {integrity: sha512-cDd3y376ecClhyytNLlY3AtsZqsqXvEkQjMvrahrv/xUWWhEIX3efD8y0uufXDe8Yuk3sEmj7J1Xlx73Y46SkA==}
@@ -2722,7 +2722,7 @@ packages:
 
 snapshots:
 
-  '@buf/airalab_connectivity-protocol.bufbuild_es@2.14.0-20260917143433-6f6f1eba1cc0.2(@bufbuild/protobuf@2.14.0)':
+  '@buf/airalab_connectivity-protocol.bufbuild_es@2.16.0-20261001150442-e61ecb9858dc.1(@bufbuild/protobuf@2.14.0)':
     dependencies:
       '@bufbuild/protobuf': 2.14.0
 

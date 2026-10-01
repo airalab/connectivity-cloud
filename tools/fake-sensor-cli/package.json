@@ -16,7 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@buf/airalab_connectivity-protocol.bufbuild_es": "2.14.0-20260917143433-6f6f1eba1cc0.2",
+    "@buf/airalab_connectivity-protocol.bufbuild_es": "2.16.0-20261001150442-e61ecb9858dc.1",
     "@bufbuild/protobuf": "^2.14.0",
     "@polkadot/util-crypto": "^14.0.3",
     "@scp/core": "workspace:*",
