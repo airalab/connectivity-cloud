@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./services/cps-auth" },
     { "path": "./services/endpoint" },
     { "path": "./services/heartbeat-tracker" },
     { "path": "./services/pubsub-broadcaster" },

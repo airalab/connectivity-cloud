@@ -94,18 +94,19 @@ Connectivity validates signature and envelope constraints; it does not decode in
 
 - `202` accepted and published to Kafka (`telemetry.authorized.v1`)
 - `401` invalid signature or stale timestamp
-- `403` sensor not authorized (not in the endpoint's whitelist; never returned when the endpoint runs with `SENSOR_AUTH_STRATEGY=none`)
+- `403` sensor not authorized (not in the endpoint's whitelist, or not in the `sensors.social` CPS subtree; never returned when the endpoint runs with `SENSOR_AUTH_STRATEGY=none`)
 - `409` duplicate nonce
 - `503` Kafka/infra unavailable
 
 ## Authorization
 
-The endpoint authorizes sensors with one of two strategies, chosen by the operator via `SENSOR_AUTH_STRATEGY`:
+The endpoint authorizes sensors with one of three strategies, chosen by the operator via `SENSOR_AUTH_STRATEGY`:
 
 - `whitelist` (default): only sensors whose public key is listed in `WHITELIST_SENSOR_IDS` are accepted. Other sensors receive `403`. Ask the operator to add your sensor's SS58 address.
+- `cps`: only sensors whose public key is the identity of a CPS node under the `sensors.social` root are accepted. Register your sensor in the CPS tree to be authorized; a rejected sensor is re-checked at most once per minute.
 - `none`: any sensor with a valid signature and timestamp is accepted.
 
-Signature, timestamp and nonce validation apply in both modes.
+Signature, timestamp and nonce validation apply in every mode.
 
 ## Monitoring and status
 

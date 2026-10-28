@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { CpsAuth, loadCpsAuthConfig } from '@scp/cps-auth';
 import { WhitelistAuth, loadWhitelistConfig } from '@scp/whitelist';
 import { OpenAuth } from './open-auth.js';
 import type { RegistryReader } from './registry-reader.js';
@@ -23,8 +24,9 @@ import { logInfo, logWarn } from './logger.js';
  *
  * - `whitelist`: only sensors listed in `WHITELIST_SENSOR_IDS` are authorized.
  * - `none`: every validly-signed sensor is authorized (no allowlist).
+ * - `cps`: sensors whose CPS node descends from the `sensors.social` root.
  */
-export type SensorAuthStrategy = 'whitelist' | 'none';
+export type SensorAuthStrategy = 'whitelist' | 'none' | 'cps';
 
 /**
  * Configuration for sensor authentication.
@@ -37,14 +39,15 @@ export interface SensorAuthConfig {
  * Loads sensor authentication configuration from environment variables.
  *
  * Environment variables:
- * - SENSOR_AUTH_STRATEGY: Authentication strategy to use (whitelist or none,
- *   default: whitelist)
+ * - SENSOR_AUTH_STRATEGY: Authentication strategy to use (whitelist, none or
+ *   cps, default: whitelist)
  */
 export function loadSensorAuthConfig(
   env: NodeJS.ProcessEnv = process.env
 ): SensorAuthConfig {
   const strategyStr = env.SENSOR_AUTH_STRATEGY ?? 'whitelist';
-  const strategy = strategyStr === 'none' ? 'none' : 'whitelist';
+  const strategy: SensorAuthStrategy =
+    strategyStr === 'none' || strategyStr === 'cps' ? strategyStr : 'whitelist';
 
   if (strategyStr !== strategy) {
     logWarn('invalid SENSOR_AUTH_STRATEGY, defaulting to whitelist', {
@@ -62,7 +65,10 @@ interface NonceAwareSensorAuth {
   rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void>;
 }
 
-function toRegistryReader(auth: NonceAwareSensorAuth): RegistryReader {
+function toRegistryReader(
+  auth: NonceAwareSensorAuth,
+  close?: () => Promise<void>
+): RegistryReader {
   return {
     authenticate: (sensorId) => auth.authenticate(sensorId),
     async getSensorRecord(sensorId) {
@@ -71,6 +77,7 @@ function toRegistryReader(auth: NonceAwareSensorAuth): RegistryReader {
     },
     isNonceSeen: (sensorId, nonce) => auth.isNonceSeen(sensorId, nonce),
     rememberNonce: (sensorId, nonce) => auth.rememberNonce(sensorId, nonce),
+    ...(close ? { close } : {}),
   };
 }
 
@@ -79,15 +86,21 @@ function toRegistryReader(auth: NonceAwareSensorAuth): RegistryReader {
  *
  * @param strategy - The authentication strategy to use
  * @returns A RegistryReader adapter over the selected strategy
+ * @throws For `cps`, if the chain is unreachable or the CPS root is invalid
  */
-export function createSensorAuthProvider(
+export async function createSensorAuthProvider(
   strategy: SensorAuthStrategy
-): RegistryReader {
+): Promise<RegistryReader> {
   logInfo('creating sensor auth provider', { strategy });
 
   if (strategy === 'none') {
     logWarn('sensor authentication disabled; any signed sensor is accepted');
     return toRegistryReader(new OpenAuth());
+  }
+
+  if (strategy === 'cps') {
+    const cpsAuth = await CpsAuth.connect(loadCpsAuthConfig());
+    return toRegistryReader(cpsAuth, () => cpsAuth.close());
   }
 
   const whitelistConfig = loadWhitelistConfig();

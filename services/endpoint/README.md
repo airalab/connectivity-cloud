@@ -4,7 +4,7 @@ The endpoint service provides the telemetry ingress endpoint (`POST /v1/telemetr
 
 ## Authentication Strategies
 
-The endpoint supports two authentication strategies that can be selected at runtime with `SENSOR_AUTH_STRATEGY`. Both run in memory with no external dependencies. The envelope signature and timestamp checks always apply.
+The endpoint supports three authentication strategies that can be selected at runtime with `SENSOR_AUTH_STRATEGY`. `whitelist` and `none` run in memory with no external dependencies; `cps` reads the Robonomics chain. The envelope signature and timestamp checks always apply.
 
 ### 1. Whitelist Strategy (Default)
 
@@ -38,6 +38,28 @@ SENSOR_AUTH_STRATEGY=none
 - Local development and testing
 - Deployments where authorization is enforced elsewhere
 
+### 3. CPS Strategy
+
+A sensor is authorized when its public key is the identity of a CPS node that is a strict descendant (any depth) of the `sensors.social` root node. The root node itself is not authorized.
+
+**Features:**
+- Read-only lookups via `cps.identityNode` and `cps.nodes` on the Robonomics chain
+- Positive decisions cached in a bounded LRU (no TTL); negative decisions cached for `CPS_AUTH_NEGATIVE_TTL_SECONDS`
+- RPC errors are never cached and deny access (fail closed)
+- At startup `CPS_ROOT_ADDRESS` must resolve to an existing CPS root node (no parent), otherwise the endpoint fails to start
+- Nonce replay protection in memory, bounded
+
+**Configuration:**
+```bash
+SENSOR_AUTH_STRATEGY=cps
+SUBSTRATE_WS_URL=wss://...
+CPS_ROOT_ADDRESS=<sensors.social-root-address>
+CPS_AUTH_CACHE_MAX_SIZE=100000
+CPS_AUTH_NEGATIVE_TTL_SECONDS=60
+```
+
+**Limitation:** changes to the ancestry or removal of a previously authorized node are not seen until its cache entry is evicted or the service restarts.
+
 ## Environment Variables
 
 ### Endpoint Configuration
@@ -51,11 +73,20 @@ SENSOR_AUTH_STRATEGY=none
 
 ### Authentication Strategy
 
-- `SENSOR_AUTH_STRATEGY` - Authentication strategy: `whitelist` or `none` (default: `whitelist`)
+- `SENSOR_AUTH_STRATEGY` - Authentication strategy: `whitelist`, `none` or `cps` (default: `whitelist`)
 
 ### Whitelist Strategy Configuration
 
 - `WHITELIST_SENSOR_IDS` - Comma-separated list of allowed sensor IDs (only used when `SENSOR_AUTH_STRATEGY=whitelist`)
+
+### CPS Strategy Configuration
+
+Only used when `SENSOR_AUTH_STRATEGY=cps`.
+
+- `SUBSTRATE_WS_URL` - Robonomics WebSocket endpoint (default: `ws://localhost:9944`)
+- `CPS_ROOT_ADDRESS` - Identity address of the `sensors.social` root CPS node (required)
+- `CPS_AUTH_CACHE_MAX_SIZE` - Maximum cached decisions (default: `100000`)
+- `CPS_AUTH_NEGATIVE_TTL_SECONDS` - Negative cache TTL in seconds (default: `60`)
 
 ### Kafka Configuration
 

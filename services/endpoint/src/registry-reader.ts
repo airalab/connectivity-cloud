@@ -26,4 +26,6 @@ export interface RegistryReader extends SensorAuth {
   getSensorRecord(sensorId: Uint8Array): Promise<SensorRegistryRecord | null>;
   isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean>;
   rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void>;
+  /** Releases external resources (e.g. chain connections) held by the provider. */
+  close?(): Promise<void>;
 }

@@ -1,7 +1,7 @@
 # WP-02 — `endpoint`
 
 ## Summary
-WP-02 implements trusted telemetry ingress at `POST /v1/telemetry`. The service validates protobuf `SignedEnvelope` payloads, verifies Ed25519 signatures over raw envelope bytes (`sensor_id || timestamp_le || nonce || message`), and authorizes sensors with a pluggable in-memory strategy (`whitelist` or `none`). Authorized events are published to Kafka, and `202` is returned only after broker acknowledgment.
+WP-02 implements trusted telemetry ingress at `POST /v1/telemetry`. The service validates protobuf `SignedEnvelope` payloads, verifies Ed25519 signatures over raw envelope bytes (`sensor_id || timestamp_le || nonce || message`), and authorizes sensors with a pluggable in-memory strategy (`whitelist`, `none` or `cps`). Authorized events are published to Kafka, and `202` is returned only after broker acknowledgment.
 
 ## Current status snapshot
 - Implemented: ingress route scaffold, schema validation, whitelist/none sensor auth with in-memory nonce checks, signature verification path, `401/403/409/503/202` response mapping.
@@ -30,7 +30,7 @@ Deliver a working Authorizer ingress path that:
 - Request body:
   - protobuf `crypto.v1.SignedEnvelope` (`application/protobuf`)
   - optional JSON wrapper with base64 `envelope`
-- Whitelist (`WHITELIST_SENSOR_IDS`) or `none` sensor authentication strategy (`SENSOR_AUTH_STRATEGY`).
+- Whitelist (`WHITELIST_SENSOR_IDS`), `cps` (CPS subtree of `sensors.social`) or `none` sensor authentication strategy (`SENSOR_AUTH_STRATEGY`).
 
 ### Outputs
 - Kafka produced events:
