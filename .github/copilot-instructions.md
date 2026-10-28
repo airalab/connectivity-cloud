@@ -51,9 +51,10 @@ This is an **event-driven telemetry pipeline** with Kafka as the central durable
 
 ### Authorization Source
 ```
-SENSOR_AUTH_STRATEGY (whitelist | none) → endpoint (in-memory lookup during validation)
+SENSOR_AUTH_STRATEGY (whitelist | none | cps) → endpoint (in-memory lookup, or cached CPS chain lookup for `cps`)
 ```
 - **whitelist** (default): only sensors in `WHITELIST_SENSOR_IDS` are authorized
+- **cps**: sensor must be a CPS descendant of the `sensors.social` root (`services/cps-auth`)
 - **none**: any validly-signed sensor is authorized
 
 ### Core Kafka Topics
@@ -68,6 +69,7 @@ SENSOR_AUTH_STRATEGY (whitelist | none) → endpoint (in-memory lookup during va
 - `packages/contracts` - Shared schemas, types, validation, and consumer runtime logic (`@scp/core`)
 - `services/endpoint` - HTTP ingress (Fastify, validates protobuf `SignedEnvelope`)
 - `services/whitelist` - Whitelist-based sensor auth provider
+- `services/cps-auth` - CPS subtree sensor auth provider (cached, read-only)
 - `services/pubsub-broadcaster` - Kafka→libp2p GossipSub bridge
 - `services/heartbeat-tracker` - Observability metrics (online sensors, uptime)
 - `services/batcher` - Kafka batcher (authorized → zstd-compressed, size-fitted `telemetry.batched.v1`)

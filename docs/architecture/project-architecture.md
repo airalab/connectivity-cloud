@@ -8,8 +8,9 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 
 `Sensor -> Endpoint -> Message Bus (Kafka) -> Services (PubSub, Batcher, Blockchain Anchor)`
 
-> Authorization source: `SENSOR_AUTH_STRATEGY` selects how the Endpoint authorizes sensors, entirely in memory (no blockchain or Redis lookup on the hot path):
+> Authorization source: `SENSOR_AUTH_STRATEGY` selects how the Endpoint authorizes sensors, in memory (`whitelist`, `none`) or via cached read-only CPS lookups (`cps`):
 > - `whitelist` (default): `WHITELIST_SENSOR_IDS` allowlist; an empty list authorizes nobody.
+> - `cps`: sensor must be a descendant of the `sensors.social` CPS root node; positive results are cached in a bounded LRU, negative results for 60s, RPC errors fail closed.
 > - `none`: any validly-signed sensor is authorized (signature, timestamp and nonce checks still apply).
 
 ### PubSub Broadcast

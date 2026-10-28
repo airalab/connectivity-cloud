@@ -329,7 +329,7 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
     timestamp_skew_seconds: config.timestampSkewSeconds,
   });
 
-  const registryReader = createSensorAuthProvider(authConfig.strategy);
+  const registryReader = await createSensorAuthProvider(authConfig.strategy);
 
   // Create Kafka producer with idempotence enabled
   const kafkaProducer = new Producer({
@@ -363,6 +363,9 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
       // (which may still be producing to Kafka) to complete before
       // disconnecting the producer.
       await app.close();
+      await registryReader.close?.().catch((error: unknown) => {
+        logError('error closing sensor auth provider during shutdown', error);
+      });
       await kafkaProducer.close().catch((error: unknown) => {
         logError('error closing Kafka producer during shutdown', error);
       });

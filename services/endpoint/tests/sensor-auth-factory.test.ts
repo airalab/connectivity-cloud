@@ -53,6 +53,12 @@ describe('sensor auth factory', () => {
       expect(loadSensorAuthConfig().strategy).toBe('none');
     });
 
+    it('should load cps strategy from env', () => {
+      process.env.SENSOR_AUTH_STRATEGY = 'cps';
+
+      expect(loadSensorAuthConfig().strategy).toBe('cps');
+    });
+
     it('should default to whitelist for invalid strategy (including removed registry-sync)', () => {
       process.env.SENSOR_AUTH_STRATEGY = 'registry-sync';
       expect(loadSensorAuthConfig().strategy).toBe('whitelist');
@@ -71,7 +77,7 @@ describe('sensor auth factory', () => {
 
       process.env.WHITELIST_SENSOR_IDS = `${sensorA.address},${sensorB.address},${sensorC.address}`;
 
-      const provider = createSensorAuthProvider('whitelist');
+      const provider = await createSensorAuthProvider('whitelist');
 
       expect(await provider.authenticate(sensorA.pubkey)).toBe(true);
       expect(await provider.authenticate(sensorB.pubkey)).toBe(true);
@@ -82,7 +88,7 @@ describe('sensor auth factory', () => {
     it('should authorize nobody with an empty whitelist', async () => {
       delete process.env.WHITELIST_SENSOR_IDS;
 
-      const provider = createSensorAuthProvider('whitelist');
+      const provider = await createSensorAuthProvider('whitelist');
 
       expect(await provider.authenticate(createTestAddress().pubkey)).toBe(
         false
@@ -95,7 +101,7 @@ describe('sensor auth factory', () => {
 
       process.env.WHITELIST_SENSOR_IDS = sensor1.address;
 
-      const provider = createSensorAuthProvider('whitelist');
+      const provider = await createSensorAuthProvider('whitelist');
 
       expect(await provider.isNonceSeen(sensor1.pubkey, nonce1)).toBe(false);
       await provider.rememberNonce(sensor1.pubkey, nonce1);
@@ -109,7 +115,7 @@ describe('sensor auth factory', () => {
 
       process.env.WHITELIST_SENSOR_IDS = `${sensor1.address},${sensor2.address}`;
 
-      const provider = createSensorAuthProvider('whitelist');
+      const provider = await createSensorAuthProvider('whitelist');
 
       expect(await provider.getSensorRecord(sensor1.pubkey)).toEqual({
         sensorId: sensor1.pubkey,
@@ -122,7 +128,7 @@ describe('sensor auth factory', () => {
       process.env.WHITELIST_SENSOR_IDS = '';
       const sensor = createTestAddress();
 
-      const provider = createSensorAuthProvider('none');
+      const provider = await createSensorAuthProvider('none');
 
       expect(await provider.authenticate(sensor.pubkey)).toBe(true);
       expect(await provider.getSensorRecord(sensor.pubkey)).toEqual({
@@ -135,7 +141,7 @@ describe('sensor auth factory', () => {
       const sensor = createTestAddress();
       const nonce = randomBytes(16);
 
-      const provider = createSensorAuthProvider('none');
+      const provider = await createSensorAuthProvider('none');
 
       expect(await provider.isNonceSeen(sensor.pubkey, nonce)).toBe(false);
       await provider.rememberNonce(sensor.pubkey, nonce);
