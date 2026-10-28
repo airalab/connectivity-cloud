@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { loadKafkaSecurityConfig } from '@scp/infra';
+import type { KafkaSecurityConfig } from '@scp/infra';
 export interface StatusTargetConfig {
   /** Technical service identifier (e.g. `batcher`). */
   name: string;
@@ -36,6 +38,8 @@ export interface EndpointConfig {
   port: number;
   source: string;
   kafkaBrokers: string[];
+  /** Kafka TLS/SASL settings shared by every producer and consumer. */
+  kafkaSecurity?: KafkaSecurityConfig;
   timestampSkewSeconds: number;
   /** Sibling services (with their default ports) shown on the status page. */
   statusTargets: StatusTargetConfig[];
@@ -77,6 +81,7 @@ export function loadEndpointConfig(
     // local/non-Cloud-Run deployments.
     port: parsePositiveInt(env.PORT ?? env.ENDPOINT_PORT, 3000),
     source: env.ENDPOINT_SOURCE ?? 'endpoint',
+    kafkaSecurity: loadKafkaSecurityConfig(env),
     kafkaBrokers: parseCsv(env.KAFKA_BROKERS, 'localhost:9092'),
     timestampSkewSeconds: parsePositiveInt(
       env.ENDPOINT_TIMESTAMP_SKEW_SECONDS,

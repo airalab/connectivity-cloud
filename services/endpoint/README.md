@@ -13,7 +13,7 @@ Only sensors listed in `WHITELIST_SENSOR_IDS` are authorized. An empty list auth
 **Features:**
 - Simple allowlist-based authorization
 - Fast in-memory lookups
-- Nonce replay protection in memory
+- Nonce replay protection via the shared Redis `NonceStore`
 
 **Configuration:**
 ```bash
@@ -27,7 +27,7 @@ Every validly-signed sensor is authorized; there is no allowlist.
 
 **Features:**
 - Open ingestion gated only by signature and timestamp validation
-- Nonce replay protection in memory, bounded (oldest nonces are evicted)
+- Nonce replay protection via the shared Redis `NonceStore`
 
 **Configuration:**
 ```bash
@@ -47,7 +47,7 @@ A sensor is authorized when its public key is the identity of a CPS node that is
 - Positive decisions cached in a bounded LRU (no TTL); negative decisions cached for `CPS_AUTH_NEGATIVE_TTL_SECONDS`
 - RPC errors are never cached and deny access (fail closed)
 - At startup `CPS_ROOT_ADDRESS` must resolve to an existing CPS root node (no parent), otherwise the endpoint fails to start
-- Nonce replay protection in memory, bounded
+- Nonce replay protection via the shared Redis `NonceStore`
 
 **Configuration:**
 ```bash
@@ -60,6 +60,19 @@ CPS_AUTH_NEGATIVE_TTL_SECONDS=60
 
 **Limitation:** changes to the ancestry or removal of a previously authorized node are not seen until its cache entry is evicted or the service restarts.
 
+## Replay protection (shared Redis nonce store)
+
+Replay protection is independent of the authentication strategy and shared by every endpoint instance, so the service is safe to run on multiple Cloud Run instances.
+
+1. After signature, timestamp and authorization checks pass, the endpoint atomically claims the pair `(sensor public key, nonce)` in Redis with `SET nonce:v1:<sha256(...)> <random token> NX EX <ttl>`. The key hashes a domain-separated, length-prefixed encoding of the raw sensor key and nonce bytes, so raw nonces never appear in Redis keys or logs.
+2. The claim happens **before** the Kafka publish. A duplicate returns `409 duplicate_nonce` (and emits a rejected event) without publishing authorized telemetry.
+3. If Redis fails, times out or returns an unexpected reply, the request fails closed with `503 nonce_store_unavailable` and nothing is published. There is no process-local fallback.
+4. If the Kafka publish fails or its ACK is uncertain (`503 kafka_unavailable`), the claim is **kept**: the broker may have accepted the event, so a release could cause a duplicate. A client retry gets `409` until the claim expires.
+
+Trade-offs: a crash after the Redis claim but before the Kafka publish suppresses the sensor's retry of that exact envelope until the TTL expires. Exactly-once delivery across Redis and Kafka is **not** provided; that would need a separate outbox design.
+
+`NONCE_TTL_SECONDS` must cover the whole interval in which the same signed envelope could still pass timestamp validation (`[ts - skew, ts + skew]`, i.e. twice the skew) plus a 60 second margin. Startup fails when it is shorter: with the default 300 second skew the minimum is 660 and the default is 900.
+
 ## Environment Variables
 
 ### Endpoint Configuration
@@ -70,6 +83,7 @@ CPS_AUTH_NEGATIVE_TTL_SECONDS=60
 - `ENDPOINT_PRODUCER_MAX_ATTEMPTS` - Kafka producer retry attempts (default: `3`)
 - `ENDPOINT_PRODUCER_RETRY_BACKOFF_MS` - Kafka producer retry backoff (default: `100`)
 - `ENDPOINT_LOG_LEVEL` - Log level (default: `info`)
+- `PORT` - Cloud Run listening port; takes precedence over `ENDPOINT_PORT`
 
 ### Authentication Strategy
 
@@ -88,9 +102,32 @@ Only used when `SENSOR_AUTH_STRATEGY=cps`.
 - `CPS_AUTH_CACHE_MAX_SIZE` - Maximum cached decisions (default: `100000`)
 - `CPS_AUTH_NEGATIVE_TTL_SECONDS` - Negative cache TTL in seconds (default: `60`)
 
+### Redis Configuration (nonce store)
+
+- `REDIS_URL` - `rediss://host:port` (Memorystore with in-transit encryption typically uses port `6378`); default `redis://localhost:6379` works only with `SCP_ALLOW_INSECURE_LOCAL=true`
+- `REDIS_AUTH_PASSWORD` - Redis AUTH string (kept out of the URL so it cannot leak into logs); inject from Secret Manager
+- `REDIS_TLS_CA_PATH` - PEM file with the trusted CA certificate(s), e.g. the Memorystore instance CA mounted from Secret Manager. Put old and new CA certificates in the same file for a rotation overlap. Server certificate verification is always on
+- `REDIS_TLS_SERVERNAME` - Optional TLS server name used for certificate verification
+- `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_COMMAND_TIMEOUT_MS` - Timeouts (defaults `5000` / `2000`)
+- `NONCE_REDIS_PREFIX` - Key prefix (default: `nonce:v1`; heartbeat-tracker uses `heartbeat-tracker:v1`)
+- `NONCE_TTL_SECONDS` - Claim lifetime (default: `900`, validated against `ENDPOINT_TIMESTAMP_SKEW_SECONDS`)
+
+In production the service refuses to start unless Redis uses TLS, a CA file and AUTH, and it fails at startup if Redis cannot be reached or rejects the credentials.
+
 ### Kafka Configuration
 
 - `KAFKA_BROKERS` - Comma-separated list of Kafka broker addresses (default: `localhost:9092`)
+- `KAFKA_SECURITY_PROTOCOL` - `SASL_SSL` (default), `SSL` or `PLAINTEXT`; only `SASL_SSL` is accepted unless `SCP_ALLOW_INSECURE_LOCAL=true`
+- `KAFKA_SASL_MECHANISM` - `OAUTHBEARER` (default) or `PLAIN`
+- `KAFKA_AUTH_PROVIDER` - `google-adc` (default; short-lived tokens from the Cloud Run service account via Application Default Credentials) or `static` (PLAIN with `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`, e.g. for self-hosted brokers)
+- `KAFKA_TLS_CA_PATH`, `KAFKA_TLS_SERVERNAME` - Optional custom CA bundle / SNI override. Certificate and hostname verification are never disabled
+- `KAFKA_GOOGLE_PRINCIPAL` - Optional service-account e-mail override if it cannot be derived from ADC
+
+All Kafka producers and consumers in this repository share the same factory (`@scp/infra`). `GOOGLE_APPLICATION_CREDENTIALS` (a long-lived key file) is rejected in production mode.
+
+### Local development mode
+
+`SCP_ALLOW_INSECURE_LOCAL=true` explicitly opts in to the plaintext, unauthenticated Docker Compose Redis and Kafka (`KAFKA_SECURITY_PROTOCOL=PLAINTEXT`). It is set by `.env.example` and must never be set in production.
 
 ## Development
 
@@ -135,8 +172,8 @@ Submit sensor telemetry data.
 - `202 Accepted` - Telemetry accepted and published to Kafka
 - `401 Unauthorized` - Invalid timestamp or signature
 - `403 Forbidden` - Sensor not authorized (not in registry/whitelist or disabled)
-- `409 Conflict` - Duplicate nonce (replay attack detected)
-- `503 Service Unavailable` - Kafka unavailable
+- `409 Conflict` - Duplicate nonce (replay attack detected; `duplicate_nonce`)
+- `503 Service Unavailable` - `nonce_store_unavailable` (Redis failure, nothing published) or `kafka_unavailable` (the nonce claim is retained)
 
 ### GET /
 
@@ -154,9 +191,13 @@ metrics section polls each sibling's `/metrics` endpoint for a few
 headline numbers: online sensors (heartbeat-tracker), connected libp2p
 peers (pubsub-broadcaster), and anchored messages (blockchain-anchor).
 
+### GET /ready
+
+Readiness probe for Cloud Run/load balancers. Returns `200 {"status":"ready"}` only when Redis (`PING`) and Kafka (authenticated metadata request) are usable; otherwise `503 {"status":"unavailable","failed":["redis"]}`. Error details and credentials are never returned (they are logged server-side). Results are cached for ~2 seconds.
+
 ### GET /health
 
-Health check endpoint.
+Liveness probe; it does not check dependencies.
 
 **Response:**
 ```json

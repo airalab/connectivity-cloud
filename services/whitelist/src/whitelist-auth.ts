@@ -37,7 +37,6 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  */
 export class WhitelistAuth implements SensorAuth {
   private readonly allowedSensors: Uint8Array[];
-  private readonly nonces = new Set<string>();
 
   constructor(allowedSensorAddresses: string[]) {
     // Decode SS58 addresses to binary public keys
@@ -75,43 +74,6 @@ export class WhitelistAuth implements SensorAuth {
       allowed,
     });
     return allowed;
-  }
-
-  /**
-   * Checks if a nonce has been seen before for replay protection.
-   *
-   * @param sensorId - The sensor ID (32-byte public key)
-   * @param nonce - The nonce to check
-   * @returns Promise resolving to true if the nonce has been seen, false otherwise
-   */
-  async isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean> {
-    const sensorIdHex = Buffer.from(sensorId).toString('hex');
-    const nonceHex = Buffer.from(nonce).toString('hex');
-    const key = `${sensorIdHex}:${nonceHex}`;
-    const seen = this.nonces.has(key);
-    logDebug('nonce seen', {
-      sensor_id: formatSensorId(sensorId),
-      nonce: nonceHex,
-      seen,
-    });
-    return seen;
-  }
-
-  /**
-   * Remembers a nonce to prevent replay attacks.
-   *
-   * @param sensorId - The sensor ID (32-byte public key)
-   * @param nonce - The nonce to remember
-   */
-  async rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void> {
-    const sensorIdHex = Buffer.from(sensorId).toString('hex');
-    const nonceHex = Buffer.from(nonce).toString('hex');
-    const key = `${sensorIdHex}:${nonceHex}`;
-    this.nonces.add(key);
-    logDebug('nonce remembered', {
-      sensor_id: formatSensorId(sensorId),
-      nonce: nonceHex,
-    });
   }
 
   /**

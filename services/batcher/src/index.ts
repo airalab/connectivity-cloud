@@ -28,6 +28,7 @@ import {
   type SignedEnvelope,
 } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { Consumer, Producer } from '@platformatic/kafka';
+import { createKafkaClientOptions, loadKafkaSecurityConfig } from '@scp/infra';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -341,14 +342,20 @@ export function createBatcherService(
     new Consumer({
       groupId: config.consumerGroupId,
       clientId: 'batcher',
-      bootstrapBrokers: config.kafkaBrokers,
+      ...createKafkaClientOptions({
+        brokers: config.kafkaBrokers,
+        security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+      }),
     });
 
   const producer =
     deps.createProducer?.() ??
     new Producer({
       clientId: 'batcher',
-      bootstrapBrokers: config.kafkaBrokers,
+      ...createKafkaClientOptions({
+        brokers: config.kafkaBrokers,
+        security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+      }),
     });
 
   const createHealthServer =

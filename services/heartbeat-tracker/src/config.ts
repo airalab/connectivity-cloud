@@ -13,14 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { loadKafkaSecurityConfig, loadRedisConfig } from '@scp/infra';
+import type { KafkaSecurityConfig, RedisConfig } from '@scp/infra';
 export interface HeartbeatTrackerConfig {
   kafkaBrokers: string[];
+  /** Kafka TLS/SASL settings shared by every producer and consumer. */
+  kafkaSecurity?: KafkaSecurityConfig;
   consumerGroupId: string;
   source: string;
   healthPort: number;
   onlineWindowMs: number;
   retentionWindowMs: number;
   redisUrl: string;
+  /** Full Redis connection settings (TLS CA, AUTH, timeouts). */
+  redis?: RedisConfig;
   redisKeyPrefix: string;
 }
 
@@ -41,6 +47,7 @@ export function loadHeartbeatTrackerConfig(
     onlineWindowMs * 10
   );
   return {
+    kafkaSecurity: loadKafkaSecurityConfig(env),
     kafkaBrokers: (env.KAFKA_BROKERS ?? 'localhost:9092')
       .split(',')
       .map((broker) => broker.trim())
@@ -51,6 +58,7 @@ export function loadHeartbeatTrackerConfig(
     onlineWindowMs,
     retentionWindowMs,
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',
+    redis: loadRedisConfig(env),
     redisKeyPrefix:
       env.HEARTBEAT_TRACKER_REDIS_PREFIX ?? 'heartbeat-tracker:v1',
   };

@@ -17,6 +17,7 @@
 export * from './utils.js';
 export * from './rejection-codes.js';
 export * from './sensor-auth.js';
+export * from './nonce-store.js';
 export * from './topics.js';
 export * from './shutdown.js';
 export * from './anchor.js';

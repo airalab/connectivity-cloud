@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { create, fromBinary } from '@bufbuild/protobuf';
 import { SignedEnvelope } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { MessageSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/core/v1/message_pb.js';
-import type { TelemetryRejectedPayload } from '@scp/core';
+import type { NonceStore, TelemetryRejectedPayload } from '@scp/core';
 import {
   formatSensorId,
   validateSignedEnvelope,
@@ -29,6 +29,16 @@ import {
   TelemetryAuthorizedPayloadSchema,
 } from '@scp/core';
 import { installShutdownHandler } from '@scp/core';
+import {
+  assertNonceTtl,
+  closeRedisClient,
+  createKafkaClientOptions,
+  createRedisClient,
+  createRedisNonceStore,
+  loadKafkaSecurityConfig,
+  loadNonceConfig,
+  loadRedisConfig,
+} from '@scp/infra';
 import type { RegistryReader } from './registry-reader.js';
 import {
   createEndpointEventProducer,
@@ -50,7 +60,12 @@ import { renderStatusPage } from './status-page.js';
 export interface EndpointDeps {
   registryReader: RegistryReader;
   producer: EndpointEventProducer;
+  /** Shared (cross-instance) replay protection, independent of the auth strategy. */
+  nonceStore: NonceStore;
 }
+
+/** A dependency probe used by `/ready`; rejects when the dependency is unusable. */
+export type ReadinessCheck = () => Promise<void>;
 
 export interface EndpointAppOptions {
   timestampSkewSeconds?: number;
@@ -60,6 +75,8 @@ export interface EndpointAppOptions {
   statusTargets?: StatusTargetConfig[];
   /** Simple headline metrics (sourced from sibling services) shown on the status page. */
   statusMetrics?: StatusMetricConfig[];
+  /** Probes for required dependencies (e.g. Redis, Kafka) reported by `/ready`. */
+  readinessChecks?: Record<string, ReadinessCheck>;
 }
 
 async function parseSignedEnvelope(request: FastifyRequest): Promise<{
@@ -97,6 +114,8 @@ export function createEndpointApp(
     accepted: 0,
     rejected: 0,
     kafkaErrors: 0,
+    duplicateNonces: 0,
+    nonceStoreErrors: 0,
   };
 
   app.addContentTypeParser(
@@ -113,6 +132,30 @@ export function createEndpointApp(
   app.get('/health', async (_request, reply) => {
     reply.header('access-control-allow-origin', '*');
     return { status: 'ok' };
+  });
+  // Readiness (as opposed to the `/health` liveness probe) fails whenever a
+  // required dependency cannot be used, so traffic is not routed to an
+  // instance that could only answer 503. Error details are never returned.
+  app.get('/ready', async (_request, reply) => {
+    const checks = Object.entries(options.readinessChecks ?? {});
+    const failed: string[] = [];
+    await Promise.all(
+      checks.map(async ([name, check]) => {
+        try {
+          await check();
+        } catch (error) {
+          failed.push(name);
+          logWarn('readiness check failed', {
+            check: name,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+    );
+    if (failed.length > 0) {
+      return reply.code(503).send({ status: 'unavailable', failed });
+    }
+    return { status: 'ready' };
   });
   app.get('/metrics', async (_request, reply) => {
     reply.header('access-control-allow-origin', '*');
@@ -240,12 +283,29 @@ export function createEndpointApp(
           .send({ status: 'rejected', error_code: 'sensor_forbidden' });
       }
 
-      const nonceSeen = await deps.registryReader.isNonceSeen(
-        parsedEnvelope.sensorId,
-        parsedEnvelope.nonce
-      );
-      if (nonceSeen) {
+      // The claim is atomic and shared by all instances, and happens before
+      // the Kafka publish. It is deliberately never released afterwards: a
+      // failed or timed-out publish may still have been accepted by the broker.
+      let claimed: boolean;
+      try {
+        claimed = await deps.nonceStore.claim(
+          parsedEnvelope.sensorId,
+          parsedEnvelope.nonce
+        );
+      } catch (error) {
+        metrics.nonceStoreErrors += 1;
         metrics.rejected += 1;
+        logError('nonce store unavailable', error, {
+          trace_id: traceId,
+          sensor_id: formatSensorId(parsedEnvelope.sensorId),
+        });
+        return reply
+          .code(503)
+          .send({ status: 'rejected', error_code: 'nonce_store_unavailable' });
+      }
+      if (!claimed) {
+        metrics.rejected += 1;
+        metrics.duplicateNonces += 1;
         publishRejectedEvent(
           create(TelemetryRejectedPayloadSchema, {
             sensorId: parsedEnvelope.sensorId,
@@ -283,22 +343,6 @@ export function createEndpointApp(
           .send({ status: 'rejected', error_code: 'kafka_unavailable' });
       }
 
-      try {
-        await deps.registryReader.rememberNonce(
-          parsedEnvelope.sensorId,
-          parsedEnvelope.nonce
-        );
-      } catch (error) {
-        metrics.rejected += 1;
-        logError('failed to remember sensor nonce', error, {
-          trace_id: traceId,
-          sensor_id: formatSensorId(parsedEnvelope.sensorId),
-        });
-        return reply
-          .code(503)
-          .send({ status: 'rejected', error_code: 'kafka_unavailable' });
-      }
-
       metrics.accepted += 1;
       return reply.code(202).send({ status: 'accepted' });
     }
@@ -317,61 +361,126 @@ export interface EndpointRuntime {
   stop(): Promise<void>;
 }
 
+/** Caches a probe's outcome briefly so frequent `/ready` polls do not hammer dependencies. */
+function cacheCheck(check: ReadinessCheck, ttlMs: number): ReadinessCheck {
+  let last: { at: number; error?: unknown } | undefined;
+  return async () => {
+    if (!last || Date.now() - last.at > ttlMs) {
+      try {
+        await check();
+        last = { at: Date.now() };
+      } catch (error) {
+        last = { at: Date.now(), error };
+      }
+    }
+    if (last.error !== undefined) throw last.error;
+  };
+}
+
+const READINESS_CACHE_MS = 2000;
+
 export async function startEndpoint(): Promise<EndpointRuntime> {
   const config = loadEndpointConfig();
   const authConfig = loadSensorAuthConfig();
+  const nonceConfig = loadNonceConfig();
+  assertNonceTtl(nonceConfig.ttlSeconds, config.timestampSkewSeconds);
+  const redisConfig = loadRedisConfig();
+  const kafkaOptions = createKafkaClientOptions({
+    brokers: config.kafkaBrokers,
+    security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+  });
 
   logInfo('starting endpoint service', {
     port: config.port,
     source: config.source,
     auth_strategy: authConfig.strategy,
     kafka_broker_count: config.kafkaBrokers.length,
+    kafka_security_protocol: (config.kafkaSecurity ?? loadKafkaSecurityConfig())
+      .protocol,
     timestamp_skew_seconds: config.timestampSkewSeconds,
+    nonce_ttl_seconds: nonceConfig.ttlSeconds,
+    nonce_prefix: nonceConfig.prefix,
   });
 
-  const registryReader = await createSensorAuthProvider(authConfig.strategy);
-
-  // Create Kafka producer with idempotence enabled
-  const kafkaProducer = new Producer({
-    clientId: 'endpoint',
-    bootstrapBrokers: config.kafkaBrokers,
-    idempotent: true,
-    acks: -1, // 'all' - wait for all in-sync replicas
-  });
-
-  const app = createEndpointApp(
-    {
-      registryReader,
-      producer: createEndpointEventProducer(kafkaProducer, config.source),
-    },
-    {
-      timestampSkewSeconds: config.timestampSkewSeconds,
-      statusPort: config.port,
-      statusTargets: config.statusTargets,
-      statusMetrics: config.statusMetrics,
-    }
+  // Startup fails (no local/unauthenticated fallback) when Redis is
+  // unreachable or rejects TLS/AUTH.
+  const redis = await createRedisClient(redisConfig);
+  const nonceStore = createRedisNonceStore(
+    redis,
+    nonceConfig,
+    closeRedisClient
   );
 
-  await app.listen({ host: '0.0.0.0', port: config.port });
-  logInfo('listening', { port: config.port });
+  let registryReader: RegistryReader | undefined;
+  let kafkaProducer: Producer | undefined;
+  try {
+    registryReader = await createSensorAuthProvider(authConfig.strategy);
 
-  return {
-    app,
-    async stop(): Promise<void> {
-      logInfo('stopping endpoint service');
-      // Stop accepting new connections and wait for in-flight requests
-      // (which may still be producing to Kafka) to complete before
-      // disconnecting the producer.
-      await app.close();
-      await registryReader.close?.().catch((error: unknown) => {
-        logError('error closing sensor auth provider during shutdown', error);
-      });
-      await kafkaProducer.close().catch((error: unknown) => {
-        logError('error closing Kafka producer during shutdown', error);
-      });
-      logInfo('endpoint service stopped');
-    },
-  };
+    // Idempotent producer; TLS/SASL come from the shared Kafka factory.
+    kafkaProducer = new Producer({
+      clientId: 'endpoint',
+      ...kafkaOptions,
+      idempotent: true,
+      acks: -1, // 'all' - wait for all in-sync replicas
+    });
+    const producerForChecks = kafkaProducer;
+    const checkKafka: ReadinessCheck = async () => {
+      await producerForChecks.metadata({ topics: [] });
+    };
+    // Fails startup on broker authentication or trust errors.
+    await checkKafka();
+
+    const app = createEndpointApp(
+      {
+        registryReader,
+        nonceStore,
+        producer: createEndpointEventProducer(kafkaProducer, config.source),
+      },
+      {
+        timestampSkewSeconds: config.timestampSkewSeconds,
+        statusPort: config.port,
+        statusTargets: config.statusTargets,
+        statusMetrics: config.statusMetrics,
+        readinessChecks: {
+          redis: cacheCheck(async () => {
+            await redis.ping();
+          }, READINESS_CACHE_MS),
+          kafka: cacheCheck(checkKafka, READINESS_CACHE_MS),
+        },
+      }
+    );
+
+    await app.listen({ host: '0.0.0.0', port: config.port });
+    logInfo('listening', { port: config.port });
+
+    const authProvider = registryReader;
+    const producer = kafkaProducer;
+    return {
+      app,
+      async stop(): Promise<void> {
+        logInfo('stopping endpoint service');
+        // Stop accepting new connections and wait for in-flight requests
+        // (which may still use Redis and Kafka) to complete before
+        // disconnecting either client.
+        await app.close();
+        await authProvider.close?.().catch((error: unknown) => {
+          logError('error closing sensor auth provider during shutdown', error);
+        });
+        await nonceStore.close().catch((error: unknown) => {
+          logError('error closing nonce store during shutdown', error);
+        });
+        await producer.close().catch((error: unknown) => {
+          logError('error closing Kafka producer during shutdown', error);
+        });
+        logInfo('endpoint service stopped');
+      },
+    };
+  } catch (error) {
+    await registryReader?.close?.().catch(() => undefined);
+    await kafkaProducer?.close().catch(() => undefined);
+    await nonceStore.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);

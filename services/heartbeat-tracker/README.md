@@ -20,12 +20,17 @@ Heartbeat timing is derived from the `Envelope.occurred_at` timestamp of the tel
 ## Environment
 
 - `KAFKA_BROKERS` (default: `localhost:9092`)
+- `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_AUTH_PROVIDER`, `KAFKA_TLS_CA_PATH`, `KAFKA_TLS_SERVERNAME` (verified TLS + SASL, shared by all services; see the endpoint README)
 - `HEARTBEAT_TRACKER_GROUP_ID` (default: `heartbeat-tracker-v1`)
 - `HEARTBEAT_TRACKER_SOURCE` (default: `heartbeat-tracker`)
 - `HEARTBEAT_TRACKER_HEALTH_PORT` (default: `3030`)
 - `HEARTBEAT_TRACKER_ONLINE_WINDOW_MS` (default: `30000`)
-- `REDIS_URL` (default: `redis://localhost:6379`)
-- `HEARTBEAT_TRACKER_REDIS_PREFIX` (default: `heartbeat-tracker:v1`)
+- `REDIS_URL` (default: `redis://localhost:6379`; use `rediss://host:6378` for Memorystore)
+- `REDIS_AUTH_PASSWORD` (Redis AUTH string, injected from Secret Manager)
+- `REDIS_TLS_CA_PATH` (PEM with the Memorystore instance CA; may contain several certificates for rotation)
+- `REDIS_TLS_SERVERNAME`, `REDIS_CONNECT_TIMEOUT_MS`, `REDIS_COMMAND_TIMEOUT_MS`
+- `SCP_ALLOW_INSECURE_LOCAL` (`true` only for local Docker Compose; otherwise TLS + AUTH are mandatory and startup fails without them)
+- `HEARTBEAT_TRACKER_REDIS_PREFIX` (default: `heartbeat-tracker:v1`; the endpoint's replay claims use the separate `nonce:v1` prefix on the same Redis instance)
 
 ## Endpoints
 
