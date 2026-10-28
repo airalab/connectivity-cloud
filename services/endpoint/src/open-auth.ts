@@ -15,39 +15,12 @@
  */
 import type { SensorAuth } from '@scp/core';
 
-const DEFAULT_MAX_NONCES = 100_000;
-
-function toHex(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('hex');
-}
-
 /**
  * "None" sensor authentication strategy: every sensor is authorized, so only
- * the envelope signature and timestamp checks gate ingestion.
- *
- * Any signer can submit, so the replay-protection nonce store is bounded and
- * evicts the oldest entries first to keep memory usage constant.
+ * the envelope signature, timestamp and shared nonce checks gate ingestion.
  */
 export class OpenAuth implements SensorAuth {
-  private readonly nonces = new Set<string>();
-
-  constructor(private readonly maxNonces: number = DEFAULT_MAX_NONCES) {}
-
   async authenticate(_sensorId: Uint8Array): Promise<boolean> {
     return true;
-  }
-
-  async isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean> {
-    return this.nonces.has(`${toHex(sensorId)}:${toHex(nonce)}`);
-  }
-
-  async rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void> {
-    this.nonces.add(`${toHex(sensorId)}:${toHex(nonce)}`);
-    if (this.nonces.size > this.maxNonces) {
-      const oldest = this.nonces.values().next().value;
-      if (oldest !== undefined) {
-        this.nonces.delete(oldest);
-      }
-    }
   }
 }

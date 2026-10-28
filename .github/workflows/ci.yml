@@ -38,6 +38,30 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
 
+  secure-infra-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure BSR Registry Auth
+        run: |
+          echo "@buf:registry=https://buf.build/gen/npm/v1/" >> ~/.npmrc
+          echo "//buf.build/gen/npm/v1/:_authToken=${{ secrets.BUF_TOKEN }}" >> ~/.npmrc
+      - uses: pnpm/setup@v2
+      - run: pnpm build
+      - name: Start TLS/AUTH Redis, plain Redis and TLS/SASL Kafka
+        run: |
+          ./docker/generate-test-certs.sh
+          docker compose --profile secure up -d redis redis-secure kafka-secure
+          for i in $(seq 1 30); do
+            nc -z localhost 6380 && nc -z localhost 9094 && nc -z localhost 6379 && break
+            sleep 2
+          done
+          sleep 15
+      - name: Run Redis/Kafka TLS + auth integration tests
+        run: |
+          SCP_INTEGRATION=true pnpm --filter @scp/infra test
+          SCP_INTEGRATION=true pnpm --filter @scp/endpoint test nonce-replay
+
 #  e2e:
 #    needs: unit-tests
 #    permissions:

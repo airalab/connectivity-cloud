@@ -13,8 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { loadKafkaSecurityConfig } from '@scp/infra';
+import type { KafkaSecurityConfig } from '@scp/infra';
 export interface PubsubBroadcasterConfig {
   kafkaBrokers: string[];
+  /** Kafka TLS/SASL settings shared by every producer and consumer. */
+  kafkaSecurity?: KafkaSecurityConfig;
   consumerGroupId: string;
   source: string;
   healthPort: number;
@@ -49,6 +53,7 @@ export function loadPubsubBroadcasterConfig(
   env: NodeJS.ProcessEnv = process.env
 ): PubsubBroadcasterConfig {
   return {
+    kafkaSecurity: loadKafkaSecurityConfig(env),
     kafkaBrokers: (env.KAFKA_BROKERS ?? 'localhost:9092')
       .split(',')
       .map((broker) => broker.trim())

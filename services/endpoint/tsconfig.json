@@ -9,6 +9,7 @@
   "exclude": ["tests/**/*.ts"],
   "references": [
     { "path": "../../packages/core" },
+    { "path": "../../packages/infra" },
     { "path": "../cps-auth" },
     { "path": "../whitelist" }
   ]

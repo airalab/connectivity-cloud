@@ -22,8 +22,15 @@ import {
   installShutdownHandler,
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
-import Redis from 'ioredis';
 import { Consumer } from '@platformatic/kafka';
+import {
+  closeRedisClient,
+  createKafkaClientOptions,
+  createRedisClient,
+  loadKafkaSecurityConfig,
+  loadRedisConfig,
+  redactRedisUrl,
+} from '@scp/infra';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import pino from 'pino';
@@ -173,8 +180,6 @@ function logError(
     message
   );
 }
-
-type RedisConstructor = new (url: string) => RedisLike;
 
 function createHeartbeatTrackerKeyspace(prefix: string) {
   return {
@@ -406,10 +411,42 @@ export function createHeartbeatTrackerService(
     new Consumer({
       groupId: config.consumerGroupId,
       clientId: 'heartbeat-tracker',
-      bootstrapBrokers: config.kafkaBrokers,
+      ...createKafkaClientOptions({
+        brokers: config.kafkaBrokers,
+        security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+      }),
     });
-  const RedisClient = Redis as unknown as RedisConstructor;
-  const redis = deps.redis ?? new RedisClient(config.redisUrl);
+  // The protected Redis connection is established in start() so TLS/AUTH
+  // failures surface at startup instead of constructing the service.
+  let redisClient: RedisLike | undefined = deps.redis;
+  const requireRedis = (): RedisLike => {
+    if (!redisClient) {
+      throw new Error('Redis client is not connected');
+    }
+    return redisClient;
+  };
+  const redis: RedisLike = {
+    hgetall: (key) => requireRedis().hgetall(key),
+    hset: (key, map) => requireRedis().hset(key, map),
+    sadd: (key, member) => requireRedis().sadd(key, member),
+    smembers: (key) => requireRedis().smembers(key),
+    srem: (key, member) => requireRedis().srem(key, member),
+    del: (key) => requireRedis().del(key),
+    eval: (script, numkeys, ...args) =>
+      requireRedis().eval(script, numkeys, ...args),
+  };
+  const closeRedis = async (): Promise<void> => {
+    const client = redisClient;
+    if (!client) return;
+    if (!deps.redis) {
+      await closeRedisClient(client as Parameters<typeof closeRedisClient>[0]);
+    } else if (typeof client.quit === 'function') {
+      await client.quit();
+    } else if (typeof client.disconnect === 'function') {
+      client.disconnect();
+    }
+    redisClient = undefined;
+  };
   const createHealthServer =
     deps.createHealthServer ?? startHealthAndMetricsServer;
   const tracker = createHeartbeatTrackerState(
@@ -448,12 +485,15 @@ export function createHeartbeatTrackerService(
         healthPort: config.healthPort,
         onlineWindowMs: config.onlineWindowMs,
         retentionWindowMs: config.retentionWindowMs,
-        redisUrl: config.redisUrl,
+        redisUrl: redactRedisUrl(config.redisUrl),
         redisKeyPrefix: config.redisKeyPrefix,
         source: config.source,
       });
 
       try {
+        redisClient ??= (await createRedisClient(
+          config.redis ?? loadRedisConfig()
+        )) as unknown as RedisLike;
         consumerStream = await consumer.consume({
           topics: [TELEMETRY_TOPICS.AUTHORIZED],
           autocommit: true,
@@ -491,11 +531,7 @@ export function createHeartbeatTrackerService(
         }
 
         await consumer.close().catch(() => undefined);
-        if (typeof redis.quit === 'function') {
-          await redis.quit();
-        } else if (typeof redis.disconnect === 'function') {
-          redis.disconnect();
-        }
+        await closeRedis().catch(() => undefined);
         logInfo('startup rollback complete');
         throw error;
       }
@@ -515,11 +551,7 @@ export function createHeartbeatTrackerService(
       await consumer.close();
       await runPromise?.catch(() => undefined);
       runPromise = null;
-      if (typeof redis.quit === 'function') {
-        await redis.quit();
-      } else if (typeof redis.disconnect === 'function') {
-        redis.disconnect();
-      }
+      await closeRedis();
       if (healthServer) {
         await new Promise<void>((resolve, reject) => {
           healthServer?.close((error) => {

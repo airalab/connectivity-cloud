@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import type { SensorAuth } from '@scp/core';
 import { CpsAuth, loadCpsAuthConfig } from '@scp/cps-auth';
 import { WhitelistAuth, loadWhitelistConfig } from '@scp/whitelist';
 import { OpenAuth } from './open-auth.js';
@@ -59,14 +60,8 @@ export function loadSensorAuthConfig(
   return { strategy };
 }
 
-interface NonceAwareSensorAuth {
-  authenticate(sensorId: Uint8Array): Promise<boolean>;
-  isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean>;
-  rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void>;
-}
-
 function toRegistryReader(
-  auth: NonceAwareSensorAuth,
+  auth: SensorAuth,
   close?: () => Promise<void>
 ): RegistryReader {
   return {
@@ -75,8 +70,6 @@ function toRegistryReader(
       const isAuthenticated = await auth.authenticate(sensorId);
       return isAuthenticated ? { sensorId, enabled: true } : null;
     },
-    isNonceSeen: (sensorId, nonce) => auth.isNonceSeen(sensorId, nonce),
-    rememberNonce: (sensorId, nonce) => auth.rememberNonce(sensorId, nonce),
     ...(close ? { close } : {}),
   };
 }

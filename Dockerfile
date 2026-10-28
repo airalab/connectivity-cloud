@@ -26,6 +26,9 @@ COPY --from=deployer /app/prod .
 # passes all other configuration as regular env vars (--set-env-vars /
 # --env-vars-file), which process.env picks up directly — nothing else to
 # bake into the image. See .env.example for the full variable list.
+# Secrets (REDIS_AUTH_PASSWORD) and CA files must come from Secret Manager
+# (--set-secrets), never from build args or the image; see
+# docs/deployment/cloud-run.md.
 ENV PORT=8080
 EXPOSE ${PORT}
 CMD ["node", "dist/index.mjs"]

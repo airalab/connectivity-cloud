@@ -14,7 +14,7 @@ telemetry via `POST /v1/telemetry` **once per minute**?
 - **Hardware (average node):** 4 vCPU, 8–16 GB RAM, standard SSD.
 - **Send interval:** 1 request per sensor per minute.
 - **Hot path:** schema validation, canonical SHA-256 hash, Ed25519 signature
-  verification, anti-replay (nonce) check against an in-memory store
+  verification, anti-replay (nonce) claim in a shared Redis store
   (no blockchain RPC on the hot path), then produce to Kafka. `202 Accepted`
   is returned only after Kafka ACK.
 - **Downstream** (PubSub, IPFS, Blockchain) is decoupled behind Kafka and does
@@ -56,9 +56,10 @@ reasonably spread across the minute.
 2. **Kafka ACK on the hot path.** `202` is returned only after Kafka ACK, so
    Kafka latency and `acks=all` directly cap per-connection throughput.
    Requires connection pooling / async producers.
-3. **Anti-replay (nonce dedup).** The in-memory nonce store grows with N
-   (bounded with oldest-first eviction in `none` mode) and is per instance, so
-   horizontal scaling needs a shared, TTL-based store (e.g. Redis) or sharding.
+3. **Anti-replay (nonce dedup).** Claims live in a shared Redis store
+   (`SET ... NX EX`, default TTL 900 s) so every instance sees them. Memory
+   grows with the number of accepted envelopes per TTL window (N x 900 s /
+   send interval); Redis adds one round trip to the hot path.
 4. **Downstream (IPFS + Blockchain).** A much slower, asynchronous path behind
    Kafka. It does not limit sensor count, but batching in IPFS/anchoring is
    mandatory or queues will grow.

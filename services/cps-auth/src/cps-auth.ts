@@ -31,7 +31,6 @@ import { logDebug, logError, logInfo } from './logger.js';
  * only, so the walk carries its own cap to stay finite on any input.
  */
 const MAX_TRAVERSAL_STEPS = 1024;
-const DEFAULT_MAX_NONCES = 100_000;
 
 /** Options for {@link CpsAuth}. */
 export interface CpsAuthOptions {
@@ -39,7 +38,6 @@ export interface CpsAuthOptions {
   rootNodeId: CpsNodeId;
   cacheMaxSize: number;
   negativeTtlSeconds: number;
-  maxNonces?: number;
   /** Clock in milliseconds; injectable for tests. */
   now?: () => number;
 }
@@ -86,9 +84,7 @@ export async function resolveRootNode(
 export class CpsAuth implements SensorAuth {
   private readonly cache: LruCache<string, boolean>;
   private readonly inFlight = new Map<string, Promise<boolean>>();
-  private readonly nonces = new Set<string>();
   private readonly negativeTtlMs: number;
-  private readonly maxNonces: number;
   private disconnect: (() => Promise<void>) | undefined;
 
   constructor(
@@ -97,7 +93,6 @@ export class CpsAuth implements SensorAuth {
   ) {
     this.cache = new LruCache(options.cacheMaxSize, options.now);
     this.negativeTtlMs = options.negativeTtlSeconds * 1000;
-    this.maxNonces = options.maxNonces ?? DEFAULT_MAX_NONCES;
   }
 
   /**
@@ -200,19 +195,5 @@ export class CpsAuth implements SensorAuth {
       info = await this.reader.getNodeInfo(info.parent);
     }
     return false;
-  }
-
-  async isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean> {
-    return this.nonces.has(`${toHex(sensorId)}:${toHex(nonce)}`);
-  }
-
-  async rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void> {
-    this.nonces.add(`${toHex(sensorId)}:${toHex(nonce)}`);
-    if (this.nonces.size > this.maxNonces) {
-      const oldest = this.nonces.values().next();
-      if (!oldest.done) {
-        this.nonces.delete(oldest.value);
-      }
-    }
   }
 }
