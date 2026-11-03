@@ -41,7 +41,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 ### Endpoint
 - Validates protobuf `crypto.v1.SignedEnvelope` schema and field constraints.
 - Verifies Ed25519 signature over raw envelope bytes.
-- Enforces timestamp window policy and replay protection via nonce deduplication (in-memory; bounded for `none`).
+- Enforces timestamp window policy and replay protection via an atomic Redis nonce claim (`SET ... NX EX`, shared by all instances and strategies) made before the Kafka publish.
 - Checks sensor authorization using a pluggable strategy (`whitelist` allowlist or `none`, which accepts any validly-signed sensor).
 - Publishes authorized events to `telemetry.authorized.v1` and rejected events to `telemetry.rejected.v1`.
 - Returns `202` only after Kafka ACK.
@@ -51,7 +51,7 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 - Sensor authentication provider used by the Endpoint's `whitelist` strategy.
 - Maintains a static, in-memory sensor allowlist from `WHITELIST_SENSOR_IDS` (SS58 addresses, decoded to public keys).
 - No external dependencies (no Redis, no blockchain RPC in the hot path).
-- Nonce replay protection is per-process (in memory); run a single Endpoint instance or accept that replay windows are per instance.
+- Replay protection is **not** part of the whitelist; the Endpoint injects a shared Redis `NonceStore`, so multiple Endpoint instances are safe.
 
 ### Kafka (central bus)
 - Durable event log and decoupling point for all processing modules.
@@ -105,10 +105,10 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 | Service | Display name | Default port | Env var |
 | --- | --- | --- | --- |
 | endpoint | Telemetry Ingress API | 3000 | `ENDPOINT_PORT` / `PORT` |
-| pubsub-broadcaster | Live Telemetry Broadcast (libp2p) | 3020 | `PUBSUB_BROADCASTER_HEALTH_PORT` |
-| heartbeat-tracker | Sensor Heartbeat Tracker | 3030 | `HEARTBEAT_TRACKER_HEALTH_PORT` |
-| batcher | Telemetry Batcher | 3041 | `BATCHER_HEALTH_PORT` |
-| blockchain-anchor | Robonomics Blockchain Anchor | 3050 | `BLOCKCHAIN_ANCHOR_HEALTH_PORT` |
+| pubsub-broadcaster | Live Telemetry Broadcast (libp2p) | 3020 | `PUBSUB_BROADCASTER_HEALTH_PORT` / `PORT` |
+| heartbeat-tracker | Sensor Heartbeat Tracker | 3030 | `HEARTBEAT_TRACKER_HEALTH_PORT` / `PORT` |
+| batcher | Telemetry Batcher | 3041 | `BATCHER_HEALTH_PORT` / `PORT` |
+| blockchain-anchor | Robonomics Blockchain Anchor | 3050 | `BLOCKCHAIN_ANCHOR_HEALTH_PORT` / `PORT` |
 
 ## Core Kafka topics
 - `telemetry.authorized.v1`

@@ -54,4 +54,22 @@ describe('heartbeat tracker config', () => {
     expect(config.redisUrl).toBe('redis://redis.internal:6379');
     expect(config.redisKeyPrefix).toBe('heartbeat-tracker:prod');
   });
+
+  it('exposes protected Redis and Kafka settings', () => {
+    const config = loadHeartbeatTrackerConfig({
+      REDIS_URL: 'rediss://10.0.0.5:6378',
+      REDIS_AUTH_PASSWORD: 'pw',
+      REDIS_TLS_CA_PATH: '/var/run/secrets/redis/ca.pem',
+      KAFKA_SECURITY_PROTOCOL: 'SASL_SSL',
+    });
+
+    expect(config.redis).toMatchObject({
+      url: 'rediss://10.0.0.5:6378',
+      password: 'pw',
+      tlsCaPath: '/var/run/secrets/redis/ca.pem',
+    });
+    expect(config.kafkaSecurity?.protocol).toBe('SASL_SSL');
+    // Heartbeat keys keep their own namespace, separate from nonce:v1.
+    expect(config.redisKeyPrefix).toBe('heartbeat-tracker:v1');
+  });
 });

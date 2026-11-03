@@ -24,6 +24,7 @@ import { create, toBinary } from '@bufbuild/protobuf';
 import { SignedEnvelopeSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/crypto/v1/envelope_pb.js';
 import { MessageSchema } from '@buf/airalab_connectivity-protocol.bufbuild_es/core/v1/message_pb.js';
 import { createEndpointApp } from '../src/index.js';
+import { InMemoryNonceStore } from './in-memory-nonce-store.js';
 import { InMemoryRegistryReader } from './in-memory-registry-reader.js';
 
 async function buildSignedEnvelopeBytes(
@@ -69,6 +70,7 @@ describe('endpoint smoke', () => {
     }> = [];
     const app = createEndpointApp({
       registryReader: new InMemoryRegistryReader([]),
+      nonceStore: new InMemoryNonceStore(),
       producer: {
         async publishAuthorized() {
           return 'event-1';
@@ -104,6 +106,7 @@ describe('endpoint smoke', () => {
     const app = createEndpointApp(
       {
         registryReader: new InMemoryRegistryReader([]),
+        nonceStore: new InMemoryNonceStore(),
         producer: {
           async publishAuthorized() {
             return 'event-1';
@@ -142,6 +145,7 @@ describe('endpoint smoke', () => {
       registryReader: new InMemoryRegistryReader([
         { sensorId: envelope.sensorId, enabled: true },
       ]),
+      nonceStore: new InMemoryNonceStore(),
       producer: {
         async publishAuthorized(payload) {
           authorized.push(payload);

@@ -40,7 +40,7 @@ concurrent flush paths can never publish the same batch twice.
 - `KAFKA_BROKERS` (default: `localhost:9092`)
 - `BATCHER_GROUP_ID` (default: `batcher-v1`)
 - `BATCHER_SOURCE` (default: `batcher`)
-- `BATCHER_HEALTH_PORT` (default: `3041`)
+- `BATCHER_HEALTH_PORT` (default: `3041`); Cloud Run `PORT` takes precedence
 - `BATCHER_BATCH_SIZE` (default: `10`) - Maximum messages per batch
 - `BATCHER_BATCH_TIMEOUT_MS` (default: `30000`) - Timeout for partial batches under low load
 - `ANCHOR_MAX_PAYLOAD_BYTES` (default: `8192`) - Maximum compressed payload size per emitted batch; larger batches are recursively split, shared default defined in `@scp/core`

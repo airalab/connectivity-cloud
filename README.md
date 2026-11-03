@@ -27,10 +27,26 @@ This will:
 4. Initialize Kafka topics
 5. Start all services
 
+## Local vs. secure infrastructure
+
+The default Docker Compose services (Kafka and Redis) are plaintext and unauthenticated. Services only talk to them when `SCP_ALLOW_INSECURE_LOCAL=true` and `KAFKA_SECURITY_PROTOCOL=PLAINTEXT` are set (both come from `.env.example`); otherwise Redis requires TLS + AUTH and Kafka requires TLS + SASL.
+
+To exercise the protected paths locally:
+
+```bash
+./docker/generate-test-certs.sh            # throw-away CA + server certificate in docker/certs
+docker compose --profile secure up -d redis-secure kafka-secure redis
+SCP_INTEGRATION=true pnpm --filter @scp/infra test
+SCP_INTEGRATION=true pnpm --filter @scp/endpoint test nonce-replay
+```
+
+See [docs/deployment/cloud-run.md](docs/deployment/cloud-run.md) for the Cloud Run, Memorystore and Managed Kafka runbook.
+
 ## Workspace layout
 
 ```text
 packages/contracts         # @scp/core - shared schemas, types, validation, consumer runtime
+packages/infra             # @scp/infra - Redis nonce store plus TLS/AUTH Redis and TLS/SASL Kafka client factories
 services/endpoint          # POST /v1/telemetry ingress - protobuf validation, signature verification
 services/whitelist         # Whitelist-based sensor authentication provider
 services/pubsub-broadcaster # Kafka→libp2p GossipSub bridge for real-time web UI

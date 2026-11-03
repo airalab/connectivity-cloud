@@ -15,6 +15,7 @@
   "dependencies": {
     "@platformatic/kafka": "^2.9.0",
     "@scp/core": "workspace:*",
+    "@scp/infra": "workspace:*",
     "ioredis": "^6.0.0",
     "pino": "^10.3.1"
   },

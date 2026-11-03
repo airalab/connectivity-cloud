@@ -19,6 +19,7 @@ import {
   STATUS_LOGO_DARK_SVG,
   STATUS_LOGO_LIGHT_SVG,
 } from '../src/status-logo.js';
+import { InMemoryNonceStore } from './in-memory-nonce-store.js';
 import { InMemoryRegistryReader } from './in-memory-registry-reader.js';
 import { createEndpointApp } from '../src/index.js';
 
@@ -164,6 +165,7 @@ describe('GET / status page route', () => {
     const app = createEndpointApp(
       {
         registryReader: new InMemoryRegistryReader([]),
+        nonceStore: new InMemoryNonceStore(),
         producer: {
           async publishAuthorized() {
             return 'event-1';
@@ -191,6 +193,7 @@ describe('GET / status page route', () => {
   it('exposes CORS on /health so the status page script can poll it cross-origin', async () => {
     const app = createEndpointApp({
       registryReader: new InMemoryRegistryReader([]),
+      nonceStore: new InMemoryNonceStore(),
       producer: {
         async publishAuthorized() {
           return 'event-1';

@@ -25,6 +25,7 @@
     "@multiformats/multiaddr": "12.5.1",
     "@platformatic/kafka": "^2.9.0",
     "@scp/core": "workspace:*",
+    "@scp/infra": "workspace:*",
     "libp2p": "2.10.0",
     "pino": "^10.3.1"
   },

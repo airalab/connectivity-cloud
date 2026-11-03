@@ -61,32 +61,6 @@ describe('WhitelistAuth', () => {
     expect(await auth.authenticate(sensor1.pubkey)).toBe(false);
   });
 
-  it('should track seen nonces', async () => {
-    const sensor1 = createTestAddress();
-    const nonce1 = randomBytes(32);
-
-    const auth = new WhitelistAuth([sensor1.address]);
-
-    expect(await auth.isNonceSeen(sensor1.pubkey, nonce1)).toBe(false);
-
-    await auth.rememberNonce(sensor1.pubkey, nonce1);
-
-    expect(await auth.isNonceSeen(sensor1.pubkey, nonce1)).toBe(true);
-  });
-
-  it('should track nonces per sensor', async () => {
-    const sensor1 = createTestAddress();
-    const sensor2 = createTestAddress();
-    const nonce1 = randomBytes(32);
-
-    const auth = new WhitelistAuth([sensor1.address, sensor2.address]);
-
-    await auth.rememberNonce(sensor1.pubkey, nonce1);
-
-    expect(await auth.isNonceSeen(sensor1.pubkey, nonce1)).toBe(true);
-    expect(await auth.isNonceSeen(sensor2.pubkey, nonce1)).toBe(false);
-  });
-
   it('should return list of allowed sensors', () => {
     const sensor1 = createTestAddress();
     const sensor2 = createTestAddress();

@@ -14,6 +14,8 @@ jobs:
     env:
       KAFKA_BROKERS: localhost:9092
       REDIS_URL: redis://localhost:6379
+      SCP_ALLOW_INSECURE_LOCAL: "true"
+      KAFKA_SECURITY_PROTOCOL: PLAINTEXT
       IPFS_API_URL: http://127.0.0.1:5001
       SUBSTRATE_WS_URL: ws://127.0.0.1:9944
       ENDPOINT_PORT: "3000"

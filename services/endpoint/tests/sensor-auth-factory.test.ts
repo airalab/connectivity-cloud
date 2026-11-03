@@ -20,7 +20,6 @@ import {
   loadSensorAuthConfig,
   createSensorAuthProvider,
 } from '../src/sensor-auth-factory.js';
-import { OpenAuth } from '../src/open-auth.js';
 
 // Helper to create SS58 test addresses (using Robonomics prefix 32)
 function createTestAddress(): { address: string; pubkey: Uint8Array } {
@@ -95,19 +94,6 @@ describe('sensor auth factory', () => {
       );
     });
 
-    it('should handle nonce management for whitelist provider', async () => {
-      const sensor1 = createTestAddress();
-      const nonce1 = randomBytes(32);
-
-      process.env.WHITELIST_SENSOR_IDS = sensor1.address;
-
-      const provider = await createSensorAuthProvider('whitelist');
-
-      expect(await provider.isNonceSeen(sensor1.pubkey, nonce1)).toBe(false);
-      await provider.rememberNonce(sensor1.pubkey, nonce1);
-      expect(await provider.isNonceSeen(sensor1.pubkey, nonce1)).toBe(true);
-    });
-
     it('should return sensor record for whitelist provider', async () => {
       const sensor1 = createTestAddress();
       const sensor2 = createTestAddress();
@@ -135,33 +121,6 @@ describe('sensor auth factory', () => {
         sensorId: sensor.pubkey,
         enabled: true,
       });
-    });
-
-    it('should track nonces for the none provider', async () => {
-      const sensor = createTestAddress();
-      const nonce = randomBytes(16);
-
-      const provider = await createSensorAuthProvider('none');
-
-      expect(await provider.isNonceSeen(sensor.pubkey, nonce)).toBe(false);
-      await provider.rememberNonce(sensor.pubkey, nonce);
-      expect(await provider.isNonceSeen(sensor.pubkey, nonce)).toBe(true);
-    });
-  });
-
-  describe('OpenAuth', () => {
-    it('should evict the oldest nonce once the bound is exceeded', async () => {
-      const auth = new OpenAuth(2);
-      const sensor = randomBytes(32);
-      const [n1, n2, n3] = [randomBytes(16), randomBytes(16), randomBytes(16)];
-
-      await auth.rememberNonce(sensor, n1);
-      await auth.rememberNonce(sensor, n2);
-      await auth.rememberNonce(sensor, n3);
-
-      expect(await auth.isNonceSeen(sensor, n1)).toBe(false);
-      expect(await auth.isNonceSeen(sensor, n2)).toBe(true);
-      expect(await auth.isNonceSeen(sensor, n3)).toBe(true);
     });
   });
 });

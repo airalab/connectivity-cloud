@@ -13,10 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { loadKafkaSecurityConfig } from '@scp/infra';
+import type { KafkaSecurityConfig } from '@scp/infra';
 import { DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES } from '@scp/core';
 
 export interface BatcherConfig {
   kafkaBrokers: string[];
+  /** Kafka TLS/SASL settings shared by every producer and consumer. */
+  kafkaSecurity?: KafkaSecurityConfig;
   consumerGroupId: string;
   source: string;
   healthPort: number;
@@ -35,13 +39,14 @@ export function loadBatcherConfig(
   env: NodeJS.ProcessEnv = process.env
 ): BatcherConfig {
   return {
+    kafkaSecurity: loadKafkaSecurityConfig(env),
     kafkaBrokers: (env.KAFKA_BROKERS ?? 'localhost:9092')
       .split(',')
       .map((broker) => broker.trim())
       .filter((broker) => broker.length > 0),
     consumerGroupId: env.BATCHER_GROUP_ID ?? 'batcher-v1',
     source: env.BATCHER_SOURCE ?? 'batcher',
-    healthPort: parsePositiveInt(env.BATCHER_HEALTH_PORT, 3041),
+    healthPort: parsePositiveInt(env.PORT ?? env.BATCHER_HEALTH_PORT, 3041),
     batchSize: parsePositiveInt(env.BATCHER_BATCH_SIZE, 10),
     batchTimeoutMs: parsePositiveInt(env.BATCHER_BATCH_TIMEOUT_MS, 30000),
     maxPayloadBytes: parsePositiveInt(

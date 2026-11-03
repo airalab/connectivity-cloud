@@ -36,4 +36,14 @@ describe('loadEndpointConfig', () => {
     const config = loadEndpointConfig({ PORT: 'not-a-number' });
     expect(config.port).toBe(3000);
   });
+
+  it('requires verified TLS and SASL for Kafka by default', () => {
+    const config = loadEndpointConfig({});
+    expect(config.kafkaSecurity).toMatchObject({
+      protocol: 'SASL_SSL',
+      saslMechanism: 'OAUTHBEARER',
+      authProvider: 'google-adc',
+      allowInsecure: false,
+    });
+  });
 });

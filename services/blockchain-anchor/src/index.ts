@@ -22,6 +22,7 @@ import {
 } from '@scp/core';
 import { fromBinary, type MessageShape } from '@bufbuild/protobuf';
 import { Consumer, Producer } from '@platformatic/kafka';
+import { createKafkaClientOptions, loadKafkaSecurityConfig } from '@scp/infra';
 import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
 import { blake2AsU8a } from '@polkadot/util-crypto';
 import { createServer, type Server } from 'node:http';
@@ -315,14 +316,20 @@ export function createBlockchainAnchorService(
     new Consumer({
       groupId: config.consumerGroupId,
       clientId: 'blockchain-anchor',
-      bootstrapBrokers: config.kafkaBrokers,
+      ...createKafkaClientOptions({
+        brokers: config.kafkaBrokers,
+        security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+      }),
     });
 
   const producer =
     deps.createProducer?.() ??
     new Producer({
       clientId: 'blockchain-anchor',
-      bootstrapBrokers: config.kafkaBrokers,
+      ...createKafkaClientOptions({
+        brokers: config.kafkaBrokers,
+        security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+      }),
     });
 
   const createHealthServer =
@@ -654,7 +661,9 @@ function startHealthAndMetricsServer(
   port: number
 ): Server {
   const server = createServer((request, response) => {
-    if (request.url === '/health') {
+    // The server starts listening only after the Kafka consumer is running,
+    // so a successful response also proves the service is ready.
+    if (request.url === '/health' || request.url === '/ready') {
       logDebug('health check requested');
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');

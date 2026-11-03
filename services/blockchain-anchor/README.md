@@ -58,7 +58,7 @@ Environment variables:
 - `BLOCKCHAIN_ANCHOR_NODE_ID` - **Required** - CPS node ID to update with payload
 - `BLOCKCHAIN_ANCHOR_SURI` - **Required** - Account seed/mnemonic for signing transactions
 - `SUBSTRATE_WS_URL` - Substrate WebSocket endpoint (default: `ws://localhost:9944`)
-- `BLOCKCHAIN_ANCHOR_HEALTH_PORT` - Health check server port (default: `3050`)
+- `BLOCKCHAIN_ANCHOR_HEALTH_PORT` - Health check server port (default: `3050`); Cloud Run `PORT` takes precedence
 - `ANCHOR_MAX_PAYLOAD_BYTES` - Maximum accepted compressed payload size in bytes (default: `8192`, shared default defined in `@scp/core`)
 - `LOG_LEVEL` - Logging level (default: `info`)
 

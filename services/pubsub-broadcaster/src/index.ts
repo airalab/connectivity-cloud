@@ -23,6 +23,7 @@ import {
 } from '@scp/core';
 import { fromBinary } from '@bufbuild/protobuf';
 import { Consumer } from '@platformatic/kafka';
+import { createKafkaClientOptions, loadKafkaSecurityConfig } from '@scp/infra';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import pino from 'pino';
@@ -190,7 +191,10 @@ export function createPubsubBroadcasterService(
     new Consumer({
       groupId: config.consumerGroupId,
       clientId: 'pubsub-broadcaster',
-      bootstrapBrokers: config.kafkaBrokers,
+      ...createKafkaClientOptions({
+        brokers: config.kafkaBrokers,
+        security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+      }),
     });
   const createPubsubClient =
     deps.createPubsubClient ??

@@ -208,27 +208,6 @@ describe('CpsAuth failures', () => {
   });
 });
 
-describe('CpsAuth nonces', () => {
-  it('tracks nonces and bounds the store', async () => {
-    const chain = new FakeChain();
-    const auth = new CpsAuth(chain, {
-      rootNodeId: ROOT,
-      cacheMaxSize: 10,
-      negativeTtlSeconds: 60,
-      maxNonces: 2,
-    });
-    const sensor = randomBytes(32);
-    const [n1, n2, n3] = [randomBytes(8), randomBytes(8), randomBytes(8)];
-
-    await auth.rememberNonce(sensor, n1);
-    expect(await auth.isNonceSeen(sensor, n1)).toBe(true);
-    await auth.rememberNonce(sensor, n2);
-    await auth.rememberNonce(sensor, n3);
-    expect(await auth.isNonceSeen(sensor, n1)).toBe(false);
-    expect(await auth.isNonceSeen(sensor, n3)).toBe(true);
-  });
-});
-
 describe('resolveRootNode', () => {
   const address = encodeAddress(randomBytes(32), 32);
 

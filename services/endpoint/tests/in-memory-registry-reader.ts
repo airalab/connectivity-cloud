@@ -25,7 +25,6 @@ function toHex(bytes: Uint8Array): string {
 /** In-memory RegistryReader for tests, seeded with known sensor records. */
 export class InMemoryRegistryReader implements RegistryReader {
   private readonly sensors = new Map<string, SensorRegistryRecord>();
-  private readonly seenNonces = new Set<string>();
 
   constructor(seed: SensorRegistryRecord[] = []) {
     seed.forEach((record) => {
@@ -42,13 +41,5 @@ export class InMemoryRegistryReader implements RegistryReader {
     sensorId: Uint8Array
   ): Promise<SensorRegistryRecord | null> {
     return this.sensors.get(toHex(sensorId)) ?? null;
-  }
-
-  async isNonceSeen(sensorId: Uint8Array, nonce: Uint8Array): Promise<boolean> {
-    return this.seenNonces.has(`${toHex(sensorId)}:${toHex(nonce)}`);
-  }
-
-  async rememberNonce(sensorId: Uint8Array, nonce: Uint8Array): Promise<void> {
-    this.seenNonces.add(`${toHex(sensorId)}:${toHex(nonce)}`);
   }
 }
