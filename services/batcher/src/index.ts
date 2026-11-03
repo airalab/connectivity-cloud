@@ -700,7 +700,11 @@ function startHealthAndMetricsServer(
   port: number
 ): Server {
   const server = createServer((request, response) => {
-    if (request.url === '/health' || request.url === '/healthz') {
+    if (
+      request.url === '/health' ||
+      request.url === '/healthz' ||
+      request.url === '/ready'
+    ) {
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');
       // Allow the endpoint service's status page to poll this endpoint

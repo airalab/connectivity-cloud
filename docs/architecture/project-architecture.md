@@ -105,10 +105,10 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 | Service | Display name | Default port | Env var |
 | --- | --- | --- | --- |
 | endpoint | Telemetry Ingress API | 3000 | `ENDPOINT_PORT` / `PORT` |
-| pubsub-broadcaster | Live Telemetry Broadcast (libp2p) | 3020 | `PUBSUB_BROADCASTER_HEALTH_PORT` |
-| heartbeat-tracker | Sensor Heartbeat Tracker | 3030 | `HEARTBEAT_TRACKER_HEALTH_PORT` |
-| batcher | Telemetry Batcher | 3041 | `BATCHER_HEALTH_PORT` |
-| blockchain-anchor | Robonomics Blockchain Anchor | 3050 | `BLOCKCHAIN_ANCHOR_HEALTH_PORT` |
+| pubsub-broadcaster | Live Telemetry Broadcast (libp2p) | 3020 | `PUBSUB_BROADCASTER_HEALTH_PORT` / `PORT` |
+| heartbeat-tracker | Sensor Heartbeat Tracker | 3030 | `HEARTBEAT_TRACKER_HEALTH_PORT` / `PORT` |
+| batcher | Telemetry Batcher | 3041 | `BATCHER_HEALTH_PORT` / `PORT` |
+| blockchain-anchor | Robonomics Blockchain Anchor | 3050 | `BLOCKCHAIN_ANCHOR_HEALTH_PORT` / `PORT` |
 
 ## Core Kafka topics
 - `telemetry.authorized.v1`

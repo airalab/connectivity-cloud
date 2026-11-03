@@ -71,7 +71,10 @@ export function loadBlockchainAnchorConfig(
     substrateWsUrl: env.SUBSTRATE_WS_URL ?? 'ws://localhost:9944',
     suri,
     nodeId: nodeIdParsed,
-    healthPort: parsePositiveInt(env.BLOCKCHAIN_ANCHOR_HEALTH_PORT, 3050),
+    healthPort: parsePositiveInt(
+      env.PORT ?? env.BLOCKCHAIN_ANCHOR_HEALTH_PORT,
+      3050
+    ),
     maxPayloadBytes: parsePositiveInt(
       env.ANCHOR_MAX_PAYLOAD_BYTES,
       DEFAULT_ANCHOR_MAX_PAYLOAD_BYTES

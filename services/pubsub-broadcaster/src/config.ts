@@ -60,7 +60,10 @@ export function loadPubsubBroadcasterConfig(
       .filter((broker) => broker.length > 0),
     consumerGroupId: env.PUBSUB_BROADCASTER_GROUP_ID ?? 'pubsub-broadcaster-v1',
     source: env.PUBSUB_BROADCASTER_SOURCE ?? 'pubsub-broadcaster',
-    healthPort: parsePositiveInt(env.PUBSUB_BROADCASTER_HEALTH_PORT, 3020),
+    healthPort: parsePositiveInt(
+      env.PORT ?? env.PUBSUB_BROADCASTER_HEALTH_PORT,
+      3020
+    ),
     pubsubTopic: env.PUBSUB_TOPIC ?? 'sensors.social/telemetry/v1',
     reservedPeers: parseList(env.PUBSUB_RESERVED_PEERS),
     minConnectedPeers: parsePositiveInt(env.PUBSUB_MIN_CONNECTED_PEERS, 0),

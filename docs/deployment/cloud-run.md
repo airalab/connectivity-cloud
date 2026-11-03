@@ -17,11 +17,14 @@ sensor -> endpoint (Cloud Run, 1..5 instances)
 | Concurrency | Start at 80 per instance; the endpoint is I/O bound (Redis + Kafka ACK) |
 | CPU / memory | Start at 1 vCPU / 512 MiB; raise if Ed25519 verification saturates CPU |
 | Request timeout | 30 s (must exceed the Kafka ACK + Redis timeouts) |
-| Startup probe | `GET /ready` (fails until Redis and Kafka are reachable and authenticated) |
-| Liveness probe | `GET /health` (does not check dependencies) |
+| Container port | `8080`. Every service listens on Cloud Run's `PORT` (the image sets `PORT=8080`), which takes precedence over the service-specific `*_PORT` / `*_HEALTH_PORT` variables |
+| Startup probe | `GET /ready` on port 8080 (endpoint: fails until Redis and Kafka are reachable and authenticated; consumers: only answers once the Kafka consumer is running; pubsub-broadcaster: also requires `PUBSUB_MIN_CONNECTED_PEERS`) |
+| Liveness probe | `GET /health` on port 8080 (does not check dependencies) |
 | CPU allocation | Always allocated for consumers (batcher, blockchain-anchor, heartbeat-tracker, pubsub-broadcaster) |
 
-All services share the same image; choose the service with `--build-arg SERVICE=<name>` (see the `Dockerfile`).
+All services share the same image; choose the service with `--build-arg SERVICE=<name>` (see the `Dockerfile`). The image sets `NODE_ENV=production`, so `SCP_ALLOW_INSECURE_LOCAL=true` makes every service fail at startup.
+
+Cloud Run does not configure HTTP probes by default (it only checks that the container port accepts a TCP connection), so the probes must be set explicitly, as shown in the deploy command below.
 
 ## Networking
 
@@ -38,10 +41,12 @@ Use one runtime service account per deployment with least privilege:
 - Never put the Redis AUTH string or certificates in `.env`, the Dockerfile, Cloud Build substitutions or build arguments.
 
 ```bash
-gcloud run deploy scp-endpoint \
+gcloud beta run deploy scp-endpoint \
   --image REGION-docker.pkg.dev/PROJECT/scp/endpoint \
   --service-account scp-runtime@PROJECT.iam.gserviceaccount.com \
-  --min-instances 1 --max-instances 5 \
+  --min-instances 1 --max-instances 5 --port 8080 \
+  --startup-probe=httpGet.path=/ready,httpGet.port=8080,periodSeconds=5,timeoutSeconds=3,failureThreshold=24 \
+  --liveness-probe=httpGet.path=/health,httpGet.port=8080,periodSeconds=30,timeoutSeconds=3,failureThreshold=3 \
   --network VPC --subnet SUBNET --vpc-egress private-ranges-only \
   --set-env-vars "SENSOR_AUTH_STRATEGY=cps,SUBSTRATE_WS_URL=wss://polkadot.rpc.robonomics.network,CPS_ROOT_ADDRESS=<root>" \
   --set-env-vars "KAFKA_BROKERS=<managed-kafka-bootstrap>:9092,KAFKA_SECURITY_PROTOCOL=SASL_SSL,KAFKA_SASL_MECHANISM=OAUTHBEARER,KAFKA_AUTH_PROVIDER=google-adc" \
@@ -49,7 +54,7 @@ gcloud run deploy scp-endpoint \
   --set-secrets "REDIS_AUTH_PASSWORD=redis-auth:latest,/var/run/secrets/redis/ca.pem=redis-ca:latest"
 ```
 
-Do not set `SCP_ALLOW_INSECURE_LOCAL` in Cloud Run.
+Use the same `--port`, `--startup-probe` and `--liveness-probe` flags for the other four services. Cloud Run has no separate readiness probe: the endpoint's `/ready` is checked at startup, so a revision that cannot reach Redis or Kafka never receives traffic. Do not set `SCP_ALLOW_INSECURE_LOCAL` in Cloud Run: it is rejected when `NODE_ENV=production` (set by the image).
 
 ## Memorystore for Redis
 
@@ -86,7 +91,7 @@ Do not set `SCP_ALLOW_INSECURE_LOCAL` in Cloud Run.
 
 ## Local development
 
-Local Docker Compose stays plaintext and is accepted only with the explicit opt-in:
+Local Docker Compose stays plaintext and is accepted only with the explicit opt-in, and never with `NODE_ENV=production`:
 
 ```bash
 SCP_ALLOW_INSECURE_LOCAL=true

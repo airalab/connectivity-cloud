@@ -127,7 +127,7 @@ All Kafka producers and consumers in this repository share the same factory (`@s
 
 ### Local development mode
 
-`SCP_ALLOW_INSECURE_LOCAL=true` explicitly opts in to the plaintext, unauthenticated Docker Compose Redis and Kafka (`KAFKA_SECURITY_PROTOCOL=PLAINTEXT`). It is set by `.env.example` and must never be set in production.
+`SCP_ALLOW_INSECURE_LOCAL=true` explicitly opts in to the plaintext, unauthenticated Docker Compose Redis and Kafka (`KAFKA_SECURITY_PROTOCOL=PLAINTEXT`). It is set by `.env.example`; services refuse to start when it is combined with `NODE_ENV=production` (the Docker image sets that).
 
 ## Development
 

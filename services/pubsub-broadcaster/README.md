@@ -31,7 +31,7 @@ in addition to plain `tcp`/`ws` addresses.
 - `KAFKA_BROKERS` (default: `localhost:9092`)
 - `PUBSUB_BROADCASTER_GROUP_ID` (default: `pubsub-broadcaster-v1`)
 - `PUBSUB_BROADCASTER_SOURCE` (default: `pubsub-broadcaster`)
-- `PUBSUB_BROADCASTER_HEALTH_PORT` (default: `3020`)
+- `PUBSUB_BROADCASTER_HEALTH_PORT` (default: `3020`); Cloud Run `PORT` takes precedence
 - `PUBSUB_TOPIC` (default: `sensors.social/telemetry/v1`)
 - `PUBSUB_RESERVED_PEERS` (comma-separated multiaddrs, e.g.
   `/dns4/relay.example.com/tcp/443/wss/p2p/12D3Koo...`; default: none)

@@ -54,7 +54,10 @@ export function loadHeartbeatTrackerConfig(
       .filter((broker) => broker.length > 0),
     consumerGroupId: env.HEARTBEAT_TRACKER_GROUP_ID ?? 'heartbeat-tracker-v1',
     source: env.HEARTBEAT_TRACKER_SOURCE ?? 'heartbeat-tracker',
-    healthPort: parsePositiveInt(env.HEARTBEAT_TRACKER_HEALTH_PORT, 3030),
+    healthPort: parsePositiveInt(
+      env.PORT ?? env.HEARTBEAT_TRACKER_HEALTH_PORT,
+      3030
+    ),
     onlineWindowMs,
     retentionWindowMs,
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',

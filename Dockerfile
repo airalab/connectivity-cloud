@@ -30,5 +30,7 @@ COPY --from=deployer /app/prod .
 # (--set-secrets), never from build args or the image; see
 # docs/deployment/cloud-run.md.
 ENV PORT=8080
+# Production images refuse SCP_ALLOW_INSECURE_LOCAL (see @scp/infra).
+ENV NODE_ENV=production
 EXPOSE ${PORT}
 CMD ["node", "dist/index.mjs"]

@@ -661,7 +661,9 @@ function startHealthAndMetricsServer(
   port: number
 ): Server {
   const server = createServer((request, response) => {
-    if (request.url === '/health') {
+    // The server starts listening only after the Kafka consumer is running,
+    // so a successful response also proves the service is ready.
+    if (request.url === '/health' || request.url === '/ready') {
       logDebug('health check requested');
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json; charset=utf-8');

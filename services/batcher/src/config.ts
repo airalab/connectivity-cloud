@@ -46,7 +46,7 @@ export function loadBatcherConfig(
       .filter((broker) => broker.length > 0),
     consumerGroupId: env.BATCHER_GROUP_ID ?? 'batcher-v1',
     source: env.BATCHER_SOURCE ?? 'batcher',
-    healthPort: parsePositiveInt(env.BATCHER_HEALTH_PORT, 3041),
+    healthPort: parsePositiveInt(env.PORT ?? env.BATCHER_HEALTH_PORT, 3041),
     batchSize: parsePositiveInt(env.BATCHER_BATCH_SIZE, 10),
     batchTimeoutMs: parsePositiveInt(env.BATCHER_BATCH_TIMEOUT_MS, 30000),
     maxPayloadBytes: parsePositiveInt(

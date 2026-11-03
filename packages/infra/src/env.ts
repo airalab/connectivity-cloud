@@ -21,11 +21,20 @@ export const ALLOW_INSECURE_LOCAL_ENV = 'SCP_ALLOW_INSECURE_LOCAL';
  * Whether insecure (plaintext, unauthenticated) Redis/Kafka connections are
  * explicitly allowed. Defaults to false so production never silently falls
  * back to an insecure connection.
+ *
+ * @throws Error when the opt-in is set while `NODE_ENV=production`
  */
 export function isInsecureLocalAllowed(
   env: NodeJS.ProcessEnv = process.env
 ): boolean {
-  return env[ALLOW_INSECURE_LOCAL_ENV]?.trim().toLowerCase() === 'true';
+  const allowed =
+    env[ALLOW_INSECURE_LOCAL_ENV]?.trim().toLowerCase() === 'true';
+  if (allowed && env.NODE_ENV?.trim().toLowerCase() === 'production') {
+    throw new Error(
+      `${ALLOW_INSECURE_LOCAL_ENV}=true is not permitted when NODE_ENV=production`
+    );
+  }
+  return allowed;
 }
 
 /** Parses a positive integer environment value, falling back when unset or invalid. */

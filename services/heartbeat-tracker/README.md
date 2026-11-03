@@ -23,7 +23,7 @@ Heartbeat timing is derived from the `Envelope.occurred_at` timestamp of the tel
 - `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_AUTH_PROVIDER`, `KAFKA_TLS_CA_PATH`, `KAFKA_TLS_SERVERNAME` (verified TLS + SASL, shared by all services; see the endpoint README)
 - `HEARTBEAT_TRACKER_GROUP_ID` (default: `heartbeat-tracker-v1`)
 - `HEARTBEAT_TRACKER_SOURCE` (default: `heartbeat-tracker`)
-- `HEARTBEAT_TRACKER_HEALTH_PORT` (default: `3030`)
+- `HEARTBEAT_TRACKER_HEALTH_PORT` (default: `3030`); Cloud Run `PORT` takes precedence
 - `HEARTBEAT_TRACKER_ONLINE_WINDOW_MS` (default: `30000`)
 - `REDIS_URL` (default: `redis://localhost:6379`; use `rediss://host:6378` for Memorystore)
 - `REDIS_AUTH_PASSWORD` (Redis AUTH string, injected from Secret Manager)
