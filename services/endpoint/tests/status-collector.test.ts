@@ -214,50 +214,51 @@ describe('status aggregation', () => {
       avgUptimeSeconds: 45,
     });
 
-    it('requests bounded server-side sensor pages with the selected filter and cursor', async () => {
-      let requestUrl = '';
-      const collector = createStatusCollector(
-        options({
-          targets: [
-            {
-              name: 'heartbeat-tracker',
-              url: 'https://heartbeats.example.run',
-            },
-          ],
-          fetch: async (input) => {
-            requestUrl = String(input);
-            return new Response(
-              JSON.stringify({
-                observedAt: '2026-11-11T09:00:00Z',
-                total: 70,
-                nextCursor: '50',
-                summary: { sensors_online: 50 },
-                sensors: [],
-              }),
-              { status: 200 }
-            );
-          },
-        })
-      );
-
-      const result = await collector.collectSensors({
-        limit: 50,
-        cursor: '20',
-        filter: 'online',
-      });
-      expect(new URL(requestUrl).search).toBe(
-        '?limit=50&cursor=20&filter=online'
-      );
-      expect(result).toMatchObject({
-        total: 70,
-        nextCursor: '50',
-        filter: 'online',
-        truncated: true,
-      });
-    });
     expect(result.sensors[0]?.sensorId).toBe(id);
     expect(result).not.toHaveProperty('sensorUrl');
     expect(result.sensors[0]).not.toHaveProperty('sensorUrl');
+  });
+
+  it('requests bounded server-side sensor pages with the selected filter and cursor', async () => {
+    let requestUrl = '';
+    const collector = createStatusCollector(
+      options({
+        targets: [
+          {
+            name: 'heartbeat-tracker',
+            url: 'https://heartbeats.example.run',
+          },
+        ],
+        fetch: async (input) => {
+          requestUrl = String(input);
+          return new Response(
+            JSON.stringify({
+              observedAt: '2026-11-11T09:00:00Z',
+              total: 70,
+              nextCursor: '50',
+              summary: { sensors_online: 50 },
+              sensors: [],
+            }),
+            { status: 200 }
+          );
+        },
+      })
+    );
+
+    const result = await collector.collectSensors({
+      limit: 50,
+      cursor: '20',
+      filter: 'online',
+    });
+    expect(new URL(requestUrl).search).toBe(
+      '?limit=50&cursor=20&filter=online'
+    );
+    expect(result).toMatchObject({
+      total: 70,
+      nextCursor: '50',
+      filter: 'online',
+      truncated: true,
+    });
   });
 
   it('rejects unsafe or non-HTTPS production targets without exposing their URL', async () => {
