@@ -228,6 +228,24 @@ export function createGoogleAdcCredentialSource(
   };
 }
 
+/** Creates an OIDC ID-token provider for an HTTPS Cloud Run service audience. */
+export function createGoogleAdcIdTokenProvider(): (
+  audience: string
+) => Promise<string> {
+  const auth = new GoogleAuth({
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+  return async (audience: string) => {
+    const client = await auth.getIdTokenClient(audience);
+    const headers = await client.getRequestHeaders(audience);
+    const token = headers.get('authorization');
+    if (!token) {
+      throw new Error('Application Default Credentials returned no ID token');
+    }
+    return token;
+  };
+}
+
 /**
  * Returns an async provider evaluated on every broker authentication, so
  * reconnects always present a fresh, unexpired token. The credential source

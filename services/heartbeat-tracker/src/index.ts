@@ -57,6 +57,22 @@ interface HeartbeatTrackerMetrics {
   avg_uptime_seconds: number;
 }
 
+export interface HeartbeatSensorPage {
+  observedAt: string;
+  limit: number;
+  total: number;
+  nextCursor: string | null;
+  summary: Pick<
+    HeartbeatTrackerMetrics,
+    | 'sensors_online'
+    | 'sensors_total_tracked'
+    | 'avg_uptime_seconds'
+    | 'max_uptime_seconds'
+    | 'online_window_ms'
+  >;
+  sensors: HeartbeatTrackerMetrics['sensors_uptime'];
+}
+
 export interface HeartbeatTrackerService {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -69,6 +85,50 @@ export interface HeartbeatTrackerState {
     eventTimestampMs: number
   ): Promise<void>;
   createMetrics(consumed: number): Promise<HeartbeatTrackerMetrics>;
+}
+
+export function createHeartbeatSensorPage(
+  metrics: HeartbeatTrackerMetrics,
+  options: { limit?: number; cursor?: string; filter?: string } = {},
+  now: () => number = Date.now
+): HeartbeatSensorPage {
+  const requestedLimit =
+    Number.isSafeInteger(options.limit) && (options.limit ?? 0) > 0
+      ? options.limit!
+      : 50;
+  const limit = Math.min(requestedLimit, 100);
+  const parsedCursor = Number.parseInt(options.cursor ?? '0', 10);
+  const offset =
+    Number.isSafeInteger(parsedCursor) && parsedCursor >= 0 ? parsedCursor : 0;
+  const filter =
+    options.filter === 'online' || options.filter === 'offline'
+      ? options.filter
+      : 'all';
+  const ordered = metrics.sensors_uptime
+    .filter((sensor) =>
+      filter === 'all' ? true : sensor.online === (filter === 'online')
+    )
+    .slice()
+    .sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      return Date.parse(b.last_seen) - Date.parse(a.last_seen);
+    });
+  const sensors = ordered.slice(offset, offset + limit);
+  const nextOffset = offset + sensors.length;
+  return {
+    observedAt: new Date(now()).toISOString(),
+    limit,
+    total: ordered.length,
+    nextCursor: nextOffset < ordered.length ? String(nextOffset) : null,
+    summary: {
+      sensors_online: metrics.sensors_online,
+      sensors_total_tracked: metrics.sensors_total_tracked,
+      avg_uptime_seconds: metrics.avg_uptime_seconds,
+      max_uptime_seconds: metrics.max_uptime_seconds,
+      online_window_ms: metrics.online_window_ms,
+    },
+    sensors,
+  };
 }
 
 interface HeartbeatTrackerDeps {
@@ -610,6 +670,32 @@ export function startHealthAndMetricsServer(
         response.setHeader('content-type', 'application/json; charset=utf-8');
         response.end(JSON.stringify({ error: 'failed to collect metrics' }));
         logError('failed to collect metrics', error);
+      }
+      return;
+    }
+
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    if (url.pathname === '/status/sensors') {
+      try {
+        const metrics = await getMetrics();
+        const requestedLimit = Number(url.searchParams.get('limit'));
+        const page = createHeartbeatSensorPage(metrics, {
+          limit: Number.isSafeInteger(requestedLimit)
+            ? requestedLimit
+            : undefined,
+          cursor: url.searchParams.get('cursor') ?? undefined,
+          filter: url.searchParams.get('filter') ?? undefined,
+        });
+        response.statusCode = 200;
+        response.setHeader('content-type', 'application/json; charset=utf-8');
+        response.end(JSON.stringify(page));
+      } catch (error) {
+        response.statusCode = 500;
+        response.setHeader('content-type', 'application/json; charset=utf-8');
+        response.end(
+          JSON.stringify({ error: 'failed to collect sensor status' })
+        );
+        logError('failed to collect sensor status', error);
       }
       return;
     }

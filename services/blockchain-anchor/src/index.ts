@@ -21,8 +21,14 @@ import {
   installShutdownHandler,
 } from '@scp/core';
 import { fromBinary, type MessageShape } from '@bufbuild/protobuf';
-import { Consumer, Producer } from '@platformatic/kafka';
-import { createKafkaClientOptions, loadKafkaSecurityConfig } from '@scp/infra';
+import { Admin, Consumer, Producer } from '@platformatic/kafka';
+import {
+  closeRedisClient,
+  createKafkaClientOptions,
+  createRedisClient,
+  loadKafkaSecurityConfig,
+  loadRedisConfig,
+} from '@scp/infra';
 import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
 import { blake2AsU8a } from '@polkadot/util-crypto';
 import { createServer, type Server } from 'node:http';
@@ -42,6 +48,21 @@ interface BlockchainAnchorMetrics {
   rejectedOversized: number;
 }
 
+interface BlockchainAnchorStatus {
+  observedAt: string;
+  queuedBatches: number | null;
+  lastFinalizedAt: string | null;
+  lastFinalizedBlock: string | null;
+  lastBatchId: string | null;
+  lastFinalizedObservationStale: boolean | null;
+  freeBalance: string | null;
+  tokenSymbol: string | null;
+  tokenDecimals: number | null;
+  bestBlock: string | null;
+  finalizedBlock: string | null;
+  finalizationGap: number | null;
+}
+
 export interface BlockchainAnchorService {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -51,10 +72,15 @@ export interface BlockchainAnchorService {
 export interface BlockchainAnchorDeps {
   createConsumer?: () => Consumer;
   createProducer?: () => Producer;
+  createAdmin?: () => Admin;
+  createStatusRedis?: () => Promise<
+    Awaited<ReturnType<typeof createRedisClient>>
+  >;
   createApi?: () => Promise<ApiPromise>;
   createHealthServer?: (
     getMetrics: () => BlockchainAnchorMetrics,
-    port: number
+    port: number,
+    getStatus?: () => Promise<BlockchainAnchorStatus>
   ) => Server;
 }
 
@@ -67,6 +93,130 @@ interface OptionBytesCodec {
   readonly isSome?: boolean;
   readonly isEmpty?: boolean;
   unwrap?: () => { toU8a: (isBare?: boolean) => Uint8Array };
+}
+
+const STORE_FINALIZED_OBSERVATION_SCRIPT = `
+local key = KEYS[1]
+local incoming = ARGV[1]
+local current = redis.call('HGET', key, 'lastFinalizedBlockNumber')
+if current and (#current > #incoming or (#current == #incoming and current >= incoming)) then
+  return 0
+end
+redis.call('HSET', key,
+  'lastFinalizedBlockNumber', incoming,
+  'lastFinalizedBlock', ARGV[2],
+  'lastFinalizedBlockHash', ARGV[3],
+  'lastBatchId', ARGV[4],
+  'lastFinalizedAt', ARGV[5])
+return 1
+`;
+
+interface KafkaOffsetAdmin {
+  metadata(options: { topics: string[] }): Promise<{
+    topics: Map<string, { partitions: unknown[] }>;
+  }>;
+  listOffsets(options: {
+    topics: Array<{
+      name: string;
+      partitions: Array<{ partitionIndex: number; timestamp: bigint }>;
+    }>;
+  }): Promise<
+    Array<{
+      name: string;
+      partitions: Array<{ partitionIndex: number; offset: bigint }>;
+    }>
+  >;
+  listConsumerGroupOffsets(options: {
+    groups: Array<{
+      groupId: string;
+      topics: Array<{ name: string; partitionIndexes: number[] }>;
+    }>;
+  }): Promise<
+    Array<{
+      groupId: string;
+      topics: Array<{
+        name: string;
+        partitions: Array<{ partitionIndex: number; committedOffset: bigint }>;
+      }>;
+    }>
+  >;
+}
+
+export async function getQueuedBatchCount(
+  admin: KafkaOffsetAdmin,
+  groupId: string,
+  topic: string
+): Promise<number | null> {
+  const metadata = await admin.metadata({
+    topics: [topic],
+    autocreateTopics: false,
+  });
+  const partitionCount = metadata.topics.get(topic)?.partitions.length ?? 0;
+  if (partitionCount === 0) return null;
+  const partitionIndexes = Array.from(
+    { length: partitionCount },
+    (_, index) => index
+  );
+  const [endTopics, groups] = await Promise.all([
+    admin.listOffsets({
+      topics: [
+        {
+          name: topic,
+          partitions: partitionIndexes.map((partitionIndex) => ({
+            partitionIndex,
+            timestamp: -1n,
+          })),
+        },
+      ],
+    }),
+    admin.listConsumerGroupOffsets({
+      groups: [{ groupId, topics: [{ name: topic, partitionIndexes }] }],
+    }),
+  ]);
+  const endByPartition = new Map(
+    endTopics
+      .find((entry) => entry.name === topic)
+      ?.partitions.map((partition) => [
+        partition.partitionIndex,
+        partition.offset,
+      ])
+  );
+  const committedByPartition = new Map(
+    groups
+      .find((group) => group.groupId === groupId)
+      ?.topics.find((entry) => entry.name === topic)
+      ?.partitions.map((partition) => [
+        partition.partitionIndex,
+        partition.committedOffset,
+      ])
+  );
+  let total = 0n;
+  for (const partition of partitionIndexes) {
+    const end = endByPartition.get(partition);
+    const committed = committedByPartition.get(partition);
+    if (end === undefined || committed === undefined || committed < 0n) {
+      return null;
+    }
+    if (end > committed) total += end - committed;
+  }
+  return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
+}
+
+function emptyStatus(now: () => number = Date.now): BlockchainAnchorStatus {
+  return {
+    observedAt: new Date(now()).toISOString(),
+    queuedBatches: null,
+    lastFinalizedAt: null,
+    lastFinalizedBlock: null,
+    lastBatchId: null,
+    lastFinalizedObservationStale: null,
+    freeBalance: null,
+    tokenSymbol: null,
+    tokenDecimals: null,
+    bestBlock: null,
+    finalizedBlock: null,
+    finalizationGap: null,
+  };
 }
 
 /**
@@ -143,6 +293,125 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+function formatBalance(value: string, decimals: number): string | null {
+  if (!/^-?\d+$/.test(value) || !Number.isInteger(decimals) || decimals < 0) {
+    return null;
+  }
+  const amount = BigInt(value);
+  const negative = amount < 0n;
+  const digits = (negative ? -amount : amount)
+    .toString()
+    .padStart(decimals + 1, '0');
+  if (decimals === 0) return `${negative ? '-' : ''}${digits}`;
+  const integer = digits.slice(0, -decimals);
+  const fraction = digits.slice(-decimals).replace(/0+$/, '');
+  return `${negative ? '-' : ''}${integer}${fraction ? `.${fraction}` : ''}`;
+}
+
+function timeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('status observation timed out')),
+      timeoutMs
+    );
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function observeBlockchain(
+  api: ApiPromise,
+  keyring: Keyring,
+  suri: string,
+  admin: Admin | null,
+  redis: Awaited<ReturnType<typeof createRedisClient>> | null,
+  groupId: string,
+  now: () => number = Date.now
+): Promise<BlockchainAnchorStatus> {
+  const result = emptyStatus(now);
+  const address = keyring.addFromUri(suri).address;
+  const key =
+    process.env.BLOCKCHAIN_ANCHOR_STATUS_REDIS_KEY ??
+    'blockchain-anchor:v1:last-finalized';
+  const [account, best, finalized, backlog, observation] =
+    await Promise.allSettled([
+      timeout(api.query.system.account(address), 3000),
+      timeout(api.rpc.chain.getHeader(), 3000),
+      timeout(
+        api.rpc.chain
+          .getFinalizedHead()
+          .then((hash) => api.rpc.chain.getHeader(hash)),
+        3000
+      ),
+      admin
+        ? timeout(
+            getQueuedBatchCount(admin, groupId, TELEMETRY_TOPICS.BATCHED),
+            3000
+          )
+        : Promise.resolve(null),
+      redis ? timeout(redis.hgetall(key), 2000) : Promise.resolve(null),
+    ]);
+
+  if (backlog.status === 'fulfilled') result.queuedBatches = backlog.value;
+  if (
+    observation.status === 'fulfilled' &&
+    observation.value &&
+    observation.value.lastFinalizedAt &&
+    /^\d+$/.test(observation.value.lastFinalizedBlock ?? '')
+  ) {
+    const observedAt = Date.parse(observation.value.lastFinalizedAt);
+    if (Number.isFinite(observedAt)) {
+      result.lastFinalizedAt = observation.value.lastFinalizedAt;
+      result.lastFinalizedBlock = observation.value.lastFinalizedBlock ?? null;
+      result.lastBatchId = observation.value.lastBatchId ?? null;
+      const staleAfterMs = Number.parseInt(
+        process.env.BLOCKCHAIN_ANCHOR_OBSERVATION_STALE_MS ?? '',
+        10
+      );
+      result.lastFinalizedObservationStale =
+        now() - observedAt >
+        (Number.isSafeInteger(staleAfterMs) && staleAfterMs > 0
+          ? staleAfterMs
+          : 86_400_000);
+    }
+  }
+  if (account.status === 'fulfilled') {
+    const data = account.value.data;
+    const decimals = api.registry.chainDecimals[0];
+    const symbol = api.registry.chainTokens[0];
+    if (typeof decimals === 'number' && typeof symbol === 'string') {
+      result.tokenDecimals = decimals;
+      result.tokenSymbol = symbol;
+      result.freeBalance = formatBalance(data.free.toString(), decimals);
+    }
+  }
+  if (best.status === 'fulfilled') {
+    result.bestBlock = best.value.number.toString();
+  }
+  if (finalized.status === 'fulfilled') {
+    result.finalizedBlock = finalized.value.number.toString();
+  }
+  if (result.bestBlock !== null && result.finalizedBlock !== null) {
+    const bestHeight = BigInt(result.bestBlock);
+    const finalizedHeight = BigInt(result.finalizedBlock);
+    if (bestHeight >= finalizedHeight) {
+      const gap = bestHeight - finalizedHeight;
+      result.finalizationGap =
+        gap <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(gap) : null;
+    }
+  }
+  return result;
+}
+
 /**
  * Forward an oversized `telemetry.batched.v1` record to the DLQ topic,
  * preserving its original bytes. This is a permanent upstream contract
@@ -194,7 +463,7 @@ async function sendSetPayloadExtrinsic(
   suri: string,
   nodeId: number,
   payload: Uint8Array
-): Promise<void> {
+): Promise<string> {
   logDebug('preparing set_payload extrinsic', {
     nodeId,
     payload_size: payload.length,
@@ -249,7 +518,7 @@ async function sendSetPayloadExtrinsic(
 
           // Check for errors in events
           if (!api.events.system?.ExtrinsicFailed) {
-            resolve();
+            resolve(result.status.asFinalized.toString());
             return;
           }
 
@@ -280,7 +549,7 @@ async function sendSetPayloadExtrinsic(
             return;
           }
 
-          resolve();
+          resolve(result.status.asFinalized.toString());
         } else if (result.isError) {
           if (unsub) {
             unsub();
@@ -331,6 +600,7 @@ export function createBlockchainAnchorService(
         security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
       }),
     });
+  let admin: Admin | null = null;
 
   const createHealthServer =
     deps.createHealthServer ?? startHealthAndMetricsServer;
@@ -351,6 +621,91 @@ export function createBlockchainAnchorService(
   };
 
   const getMetrics = (): BlockchainAnchorMetrics => metrics;
+  let statusCache: { at: number; value: BlockchainAnchorStatus } | undefined;
+  let statusInFlight: Promise<BlockchainAnchorStatus> | undefined;
+  type StatusRedisClient = Awaited<ReturnType<typeof createRedisClient>>;
+  let statusRedisPromise: Promise<StatusRedisClient> | undefined;
+  const pendingStatusWrites = new Set<Promise<void>>();
+  const statusRedisKey =
+    process.env.BLOCKCHAIN_ANCHOR_STATUS_REDIS_KEY ??
+    'blockchain-anchor:v1:last-finalized';
+  const getStatusRedis = async (): Promise<StatusRedisClient> => {
+    statusRedisPromise ??= (
+      deps.createStatusRedis?.() ?? createRedisClient(loadRedisConfig())
+    ).catch((error: unknown) => {
+      statusRedisPromise = undefined;
+      throw error;
+    });
+    return statusRedisPromise;
+  };
+  const closeStatusRedis = async (): Promise<void> => {
+    const client = await statusRedisPromise?.catch(() => undefined);
+    statusRedisPromise = undefined;
+    if (client) await closeRedisClient(client);
+  };
+  const recordFinalizedObservation = (
+    blockHash: string,
+    batchId: string
+  ): void => {
+    const currentApi = api;
+    if (!currentApi) return;
+    const observedAt = new Date().toISOString();
+    const write = (async () => {
+      const header = await timeout(
+        currentApi.rpc.chain.getHeader(blockHash),
+        3000
+      );
+      const client = await getStatusRedis();
+      await timeout(
+        client.eval(
+          STORE_FINALIZED_OBSERVATION_SCRIPT,
+          1,
+          statusRedisKey,
+          header.number.toString(),
+          header.number.toString(),
+          blockHash,
+          batchId,
+          observedAt
+        ),
+        2000
+      );
+      statusCache = undefined;
+    })().catch((error: unknown) => {
+      logWarn('failed to persist finalized batch observation', {
+        reason: error instanceof Error ? error.message : 'unknown error',
+      });
+    });
+    pendingStatusWrites.add(write);
+    void write.finally(() => pendingStatusWrites.delete(write));
+  };
+  const getStatus = async (): Promise<BlockchainAnchorStatus> => {
+    if (statusCache && Date.now() - statusCache.at < 15_000) {
+      return statusCache.value;
+    }
+    if (statusInFlight) return statusInFlight;
+    const currentApi = api;
+    const currentKeyring = keyring;
+    if (!currentApi || !currentKeyring) {
+      return emptyStatus();
+    }
+    const statusRedis = await timeout(getStatusRedis(), 1500).catch(() => null);
+    statusInFlight = observeBlockchain(
+      currentApi,
+      currentKeyring,
+      config.suri,
+      admin,
+      statusRedis,
+      config.consumerGroupId
+    ).then((value) => {
+      statusCache = { at: Date.now(), value };
+      return value;
+    });
+    try {
+      return await statusInFlight;
+    } finally {
+      statusInFlight = undefined;
+    }
+  };
 
   return {
     async start(): Promise<void> {
@@ -385,6 +740,16 @@ export function createBlockchainAnchorService(
         // Initialize keyring
         keyring = new Keyring({ type: 'sr25519' });
         logInfo('keyring initialized');
+        admin =
+          deps.createAdmin?.() ??
+          new Admin({
+            clientId: 'blockchain-anchor-status',
+            autocreateTopics: false,
+            ...createKafkaClientOptions({
+              brokers: config.kafkaBrokers,
+              security: config.kafkaSecurity ?? loadKafkaSecurityConfig(),
+            }),
+          });
 
         // Start Kafka consumer
         const consumerStream = await consumer.consume({
@@ -392,7 +757,11 @@ export function createBlockchainAnchorService(
           autocommit: false,
         });
 
-        healthServer = createHealthServer(getMetrics, config.healthPort);
+        healthServer = createHealthServer(
+          getMetrics,
+          config.healthPort,
+          getStatus
+        );
 
         runPromise = (async () => {
           try {
@@ -526,7 +895,7 @@ export function createBlockchainAnchorService(
                     }
                   );
                 } else {
-                  await sendSetPayloadExtrinsic(
+                  const finalizedBlockHash = await sendSetPayloadExtrinsic(
                     api!,
                     keyring!,
                     config.suri,
@@ -535,6 +904,10 @@ export function createBlockchainAnchorService(
                   );
 
                   metrics.anchored += 1;
+                  recordFinalizedObservation(
+                    finalizedBlockHash,
+                    payload.batchId
+                  );
 
                   logInfo('batch anchored successfully', {
                     batch_id: payload.batchId,
@@ -599,6 +972,9 @@ export function createBlockchainAnchorService(
         }
 
         await consumer.close().catch(() => undefined);
+        await admin?.close().catch(() => undefined);
+        admin = null;
+        await closeStatusRedis().catch(() => undefined);
         await api?.disconnect();
         api = null;
         keyring = null;
@@ -628,12 +1004,20 @@ export function createBlockchainAnchorService(
       );
       await runPromise?.catch(() => undefined);
       runPromise = null;
+      await Promise.allSettled([...pendingStatusWrites]);
 
       await api?.disconnect();
       api = null;
       keyring = null;
 
       await producer.close().catch(() => undefined);
+      await admin?.close().catch(() => undefined);
+      admin = null;
+      await closeStatusRedis().catch((error: unknown) => {
+        logWarn('error closing status Redis client', {
+          reason: error instanceof Error ? error.message : 'unknown error',
+        });
+      });
 
       if (healthServer) {
         await new Promise<void>((resolve, reject) => {
@@ -658,7 +1042,8 @@ export function createBlockchainAnchorService(
 
 function startHealthAndMetricsServer(
   getMetrics: () => BlockchainAnchorMetrics,
-  port: number
+  port: number,
+  getStatus: () => Promise<BlockchainAnchorStatus> = async () => emptyStatus()
 ): Server {
   const server = createServer((request, response) => {
     // The server starts listening only after the Kafka consumer is running,
@@ -688,6 +1073,24 @@ function startHealthAndMetricsServer(
       // directly from the browser.
       response.setHeader('access-control-allow-origin', '*');
       response.end(JSON.stringify(metrics));
+      return;
+    }
+
+    if (request.url === '/status') {
+      void getStatus()
+        .then((status) => {
+          response.statusCode = 200;
+          response.setHeader('content-type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify(status));
+        })
+        .catch((error: unknown) => {
+          logWarn('blockchain status observation failed', {
+            reason: error instanceof Error ? error.message : 'unknown error',
+          });
+          response.statusCode = 200;
+          response.setHeader('content-type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify(emptyStatus()));
+        });
       return;
     }
 

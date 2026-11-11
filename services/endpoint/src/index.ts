@@ -56,6 +56,10 @@ import {
 } from './sensor-auth-factory.js';
 import { logDebug, logError, logInfo, logWarn } from './logger.js';
 import { renderStatusPage } from './status-page.js';
+import {
+  createStatusCollector,
+  type StatusTarget,
+} from './status-collector.js';
 
 export interface EndpointDeps {
   registryReader: RegistryReader;
@@ -75,6 +79,8 @@ export interface EndpointAppOptions {
   statusTargets?: StatusTargetConfig[];
   /** Simple headline metrics (sourced from sibling services) shown on the status page. */
   statusMetrics?: StatusMetricConfig[];
+  /** Private Cloud Run base URLs, configured by the operator and never returned to browsers. */
+  statusUrls?: StatusTarget[];
   /** Probes for required dependencies (e.g. Redis, Kafka) reported by `/ready`. */
   readinessChecks?: Record<string, ReadinessCheck>;
 }
@@ -162,19 +168,30 @@ export function createEndpointApp(
     return metrics;
   });
 
-  // Static, minimalistic status page: the server renders identical markup
-  // on every request (no server-side probing). A small inline script in
-  // the page itself fetches each service's `/health` endpoint (ports
-  // sourced from `.env`) using the browser's own hostname, and keeps the
-  // table updated on an interval.
-  const statusPageHtml = renderStatusPage({
-    selfPort: options.statusPort ?? 3000,
-    targets: options.statusTargets ?? [],
-    metrics: options.statusMetrics ?? [],
+  const statusCollector = createStatusCollector({
+    targets:
+      options.statusUrls ??
+      (options.statusTargets ?? []).map(({ name }) => ({ name })),
+    checkEndpointReadiness: async () => {
+      const checks = Object.values(options.readinessChecks ?? {});
+      await Promise.all(checks.map((check) => check()));
+    },
   });
+  const statusPageHtml = renderStatusPage();
   app.get('/', async (_request, reply) =>
     reply.type('text/html; charset=utf-8').send(statusPageHtml)
   );
+  app.get('/api/status', async () => statusCollector.collectStatus());
+  app.get('/api/status/sensors', async (request) => {
+    const query = new URL(request.url, 'http://127.0.0.1').searchParams;
+    const limit = Number(query.get('limit'));
+    return statusCollector.collectSensors({
+      limit: Number.isSafeInteger(limit) ? limit : undefined,
+      cursor: query.get('cursor') ?? undefined,
+      filter: query.get('filter') ?? undefined,
+    });
+  });
+  app.get('/api/status/network', async () => statusCollector.collectNetwork());
 
   // Rejection events are published fire-and-forget from request handlers so
   // that Kafka latency never delays the HTTP response. Track the in-flight
@@ -441,6 +458,21 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
         statusPort: config.port,
         statusTargets: config.statusTargets,
         statusMetrics: config.statusMetrics,
+        statusUrls: [
+          {
+            name: 'pubsub-broadcaster',
+            url: process.env.PUBSUB_BROADCASTER_URL,
+          },
+          {
+            name: 'heartbeat-tracker',
+            url: process.env.HEARTBEAT_TRACKER_URL,
+          },
+          { name: 'batcher', url: process.env.BATCHER_URL },
+          {
+            name: 'blockchain-anchor',
+            url: process.env.BLOCKCHAIN_ANCHOR_URL,
+          },
+        ],
         readinessChecks: {
           redis: cacheCheck(async () => {
             await redis.ping();

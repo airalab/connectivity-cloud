@@ -76,3 +76,13 @@ Example:
   "avg_uptime_seconds": 24.5
 }
 ```
+
+### `GET /status/sensors`
+
+Private read-only status endpoint used by the endpoint collector. It returns
+the same heartbeat summary with a bounded sensor list, sorted online-first and
+most-recently-seen within each group. `limit` defaults to 50 and is capped at
+100; `cursor` is a server-side numeric offset and `filter` accepts `all`,
+`online`, or `offline`. The response contains `total`, `nextCursor`,
+`observedAt`, `summary`, and the selected `sensors` only. It does not create
+SS58 addresses or external URLs.
