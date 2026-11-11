@@ -679,12 +679,14 @@ export function startHealthAndMetricsServer(
       try {
         const metrics = await getMetrics();
         const requestedLimit = Number(url.searchParams.get('limit'));
+        const cursor = url.searchParams.get('cursor');
+        const filter = url.searchParams.get('filter');
         const page = createHeartbeatSensorPage(metrics, {
-          limit: Number.isSafeInteger(requestedLimit)
-            ? requestedLimit
-            : undefined,
-          cursor: url.searchParams.get('cursor') ?? undefined,
-          filter: url.searchParams.get('filter') ?? undefined,
+          ...(Number.isSafeInteger(requestedLimit)
+            ? { limit: requestedLimit }
+            : {}),
+          ...(cursor !== null ? { cursor } : {}),
+          ...(filter !== null ? { filter } : {}),
         });
         response.statusCode = 200;
         response.setHeader('content-type', 'application/json; charset=utf-8');
