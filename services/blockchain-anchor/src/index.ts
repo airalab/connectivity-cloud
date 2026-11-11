@@ -112,7 +112,7 @@ return 1
 `;
 
 interface KafkaOffsetAdmin {
-  metadata(options: { topics: string[] }): Promise<{
+  metadata(options: { topics: string[]; autocreateTopics?: boolean }): Promise<{
     topics: Map<string, { partitions: unknown[] }>;
   }>;
   listOffsets(options: {
@@ -308,6 +308,18 @@ function formatBalance(value: string, decimals: number): string | null {
   return `${negative ? '-' : ''}${integer}${fraction ? `.${fraction}` : ''}`;
 }
 
+function getFreeBalance(account: unknown): string | null {
+  if (typeof account !== 'object' || account === null || !('data' in account)) {
+    return null;
+  }
+  const data = account.data;
+  if (typeof data !== 'object' || data === null || !('free' in data)) {
+    return null;
+  }
+  const free = data.free;
+  return free === null || free === undefined ? null : String(free);
+}
+
 function timeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
@@ -342,9 +354,13 @@ async function observeBlockchain(
   const key =
     process.env.BLOCKCHAIN_ANCHOR_STATUS_REDIS_KEY ??
     'blockchain-anchor:v1:last-finalized';
+  const accountQuery = api.query.system?.account;
+  const accountRequest = accountQuery
+    ? accountQuery(address)
+    : Promise.resolve(null);
   const [account, best, finalized, backlog, observation] =
     await Promise.allSettled([
-      timeout(api.query.system.account(address), 3000),
+      timeout(accountRequest, 3000),
       timeout(api.rpc.chain.getHeader(), 3000),
       timeout(
         api.rpc.chain
@@ -384,14 +400,15 @@ async function observeBlockchain(
           : 86_400_000);
     }
   }
-  if (account.status === 'fulfilled') {
-    const data = account.value.data;
+  if (account.status === 'fulfilled' && account.value !== null) {
     const decimals = api.registry.chainDecimals[0];
     const symbol = api.registry.chainTokens[0];
     if (typeof decimals === 'number' && typeof symbol === 'string') {
       result.tokenDecimals = decimals;
       result.tokenSymbol = symbol;
-      result.freeBalance = formatBalance(data.free.toString(), decimals);
+      const freeBalance = getFreeBalance(account.value);
+      result.freeBalance =
+        freeBalance === null ? null : formatBalance(freeBalance, decimals);
     }
   }
   if (best.status === 'fulfilled') {
