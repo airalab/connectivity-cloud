@@ -184,11 +184,14 @@ export function createEndpointApp(
   app.get('/api/status', async () => statusCollector.collectStatus());
   app.get('/api/status/sensors', async (request) => {
     const query = new URL(request.url, 'http://127.0.0.1').searchParams;
-    const limit = Number(query.get('limit'));
+    const limitParam = query.get('limit');
+    const limit = limitParam === null ? Number.NaN : Number(limitParam);
+    const cursor = query.get('cursor');
+    const filter = query.get('filter');
     return statusCollector.collectSensors({
-      limit: Number.isSafeInteger(limit) ? limit : undefined,
-      cursor: query.get('cursor') ?? undefined,
-      filter: query.get('filter') ?? undefined,
+      ...(Number.isSafeInteger(limit) ? { limit } : {}),
+      ...(cursor !== null ? { cursor } : {}),
+      ...(filter !== null ? { filter } : {}),
     });
   });
   app.get('/api/status/network', async () => statusCollector.collectNetwork());
@@ -461,16 +464,27 @@ export async function startEndpoint(): Promise<EndpointRuntime> {
         statusUrls: [
           {
             name: 'pubsub-broadcaster',
-            url: process.env.PUBSUB_BROADCASTER_URL,
+            ...(process.env.PUBSUB_BROADCASTER_URL !== undefined
+              ? { url: process.env.PUBSUB_BROADCASTER_URL }
+              : {}),
           },
           {
             name: 'heartbeat-tracker',
-            url: process.env.HEARTBEAT_TRACKER_URL,
+            ...(process.env.HEARTBEAT_TRACKER_URL !== undefined
+              ? { url: process.env.HEARTBEAT_TRACKER_URL }
+              : {}),
           },
-          { name: 'batcher', url: process.env.BATCHER_URL },
+          {
+            name: 'batcher',
+            ...(process.env.BATCHER_URL !== undefined
+              ? { url: process.env.BATCHER_URL }
+              : {}),
+          },
           {
             name: 'blockchain-anchor',
-            url: process.env.BLOCKCHAIN_ANCHOR_URL,
+            ...(process.env.BLOCKCHAIN_ANCHOR_URL !== undefined
+              ? { url: process.env.BLOCKCHAIN_ANCHOR_URL }
+              : {}),
           },
         ],
         readinessChecks: {

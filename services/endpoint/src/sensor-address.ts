@@ -57,7 +57,7 @@ export function sensorIdToSs58(hex: string): string {
     [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
   ];
   const h = iv.slice();
-  h[0] ^= 0x01010040n;
+  h[0] = h[0]! ^ 0x01010040n;
   const block = new Uint8Array(128);
   block.set(message);
   const m = Array.from({ length: 16 }, (_, i) => {
@@ -68,8 +68,8 @@ export function sensorIdToSs58(hex: string): string {
     return word;
   });
   const v = [...h, ...iv];
-  v[12] ^= BigInt(message.length);
-  v[14] ^= mask;
+  v[12] = v[12]! ^ BigInt(message.length);
+  v[14] = v[14]! ^ mask;
 
   const rotateRight = (x: bigint, bits: bigint): bigint =>
     ((x >> bits) | (x << (64n - bits))) & mask;
