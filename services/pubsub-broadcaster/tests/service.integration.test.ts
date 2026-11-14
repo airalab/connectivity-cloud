@@ -141,6 +141,39 @@ describe('pubsub broadcaster connectivity-based Kafka pause/resume', () => {
 });
 
 describe('pubsub broadcaster integration flow (mock harness)', () => {
+  it('updates reserved peer metrics when connectivity gating is disabled', async () => {
+    async function* emptyStream() {}
+    const fakeConsumer = {
+      async consume() {
+        return emptyStream();
+      },
+      async close() {},
+    };
+    const service = createPubsubBroadcasterService(
+      testConfig({ minConnectedPeers: 0 }),
+      {
+        createConsumer: () => fakeConsumer as unknown as Consumer,
+        createPubsubClient: async () => ({
+          async start() {},
+          async stop() {},
+          async publish() {},
+          getConnectedPeerIds: () => ['reserved-peer-1', 'reserved-peer-2'],
+        }),
+        createHealthServer: () =>
+          ({
+            close(callback: (error?: Error) => void) {
+              callback();
+            },
+          }) as unknown as import('node:http').Server,
+      }
+    );
+
+    await service.start();
+    expect(service.getMetrics().connectedPeerCount).toBe(2);
+    expect(service.isReady()).toBe(true);
+    await service.stop();
+  });
+
   it('processes consume -> publish flow with autocommit', async () => {
     const callOrder: string[] = [];
 

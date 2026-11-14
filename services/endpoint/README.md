@@ -177,19 +177,45 @@ Submit sensor telemetry data.
 
 ### GET /
 
-Static, minimalistic status page branded with the Robonomics Network logo
-(inlined SVG; the black variant is shown in light mode and the white variant
-in dark mode). Server-rendered markup is identical on
-every request (no server-side probing); an inline script in the page polls
-this service's `/health` plus each sibling service's `/health` endpoint
-(ports read from `.env`) using `window.location.hostname` — the same host
-the browser used to load the page — directly from the browser, and
-refreshes the table every 5 seconds. Services are listed by descriptive
-name (e.g. "Telemetry Batcher") with the technical service name shown
-underneath. Below the service table, a small
-metrics section polls each sibling's `/metrics` endpoint for a few
-headline numbers: online sensors (heartbeat-tracker), connected libp2p
-peers (pubsub-broadcaster), and anchored messages (blockchain-anchor).
+Serves a single self-contained dashboard with Overview, Sensors, and Network
+tabs. Hash links (`/#overview`, `/#sensors`, `/#network`), accessible keyboard
+navigation, and light/dark Robonomics branding are supported. The browser only
+requests same-origin `/api/status*` routes; it never contacts private services.
+Sensors and Network data load on demand and only the active tab refreshes every
+30 seconds. Sensor rows use bounded server-side pages (50 by default, up to 100)
+with online/offline filters and display the complete SS58 address. The browser
+validates each complete hex ID, converts it to SS58 prefix 32, and creates a
+fixed-origin `sensors.social` link; invalid IDs remain non-clickable text.
+
+The endpoint's status collector calls configured private Cloud Run service
+URLs using ADC-backed OIDC ID tokens. Set `PUBSUB_BROADCASTER_URL`,
+`HEARTBEAT_TRACKER_URL`, `BATCHER_URL`, and `BLOCKCHAIN_ANCHOR_URL` to the
+service HTTPS URLs. ID tokens are only sent to HTTPS origins that match
+`STATUS_ALLOWED_UPSTREAM_HOSTS` (comma-separated exact hostnames or
+`*.suffix` patterns) or, when that variable is unset, Cloud Run `*.run.app`
+hostnames; the check runs before credentials are requested. Production has no
+unauthenticated fallback: missing, disallowed, or invalid configuration is
+shown as unknown. Local development defaults to the service ports on
+`127.0.0.1`, honoring `PUBSUB_BROADCASTER_HEALTH_PORT`,
+`HEARTBEAT_TRACKER_HEALTH_PORT`, `BATCHER_HEALTH_PORT`, and
+`BLOCKCHAIN_ANCHOR_HEALTH_PORT`. Collection is cached and deduplicated per endpoint
+instance, not synchronized across Cloud Run instances.
+
+### GET /api/status, /api/status/sensors, /api/status/network
+
+Return sanitized same-origin JSON snapshots with freshness metadata:
+`observedAt` is when the upstream state was measured, `fetchedAt` is when the
+collector read it, and `stale: true` means a refresh failed and the last valid
+observation (at most `STATUS_STALE_MAX_AGE_MS`, default 5 minutes, old) is being
+served; the network response reports this per section. Sensor snapshots are
+validated before `available: true`; a malformed or incomplete upstream response
+is `available: false`, never an empty list.
+Missing measurements are `null` or unavailable, never fabricated as zero.
+Snapshots remain HTTP 200 when a monitored service is unavailable. The
+collector applies bounded probes and classifies readiness using `/ready`;
+private service URLs, credentials, and raw upstream errors are not returned.
+The Sensors API includes complete public hex IDs and cursor-based page metadata;
+it never returns SS58 addresses or presentation URLs.
 
 ### GET /ready
 

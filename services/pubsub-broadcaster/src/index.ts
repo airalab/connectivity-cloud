@@ -288,20 +288,27 @@ export function createPubsubBroadcasterService(
           if (metrics.kafkaPaused) {
             consumerStream.pause?.();
           }
-          const pollIntervalMs = Math.min(
-            MAX_CONNECTIVITY_POLL_INTERVAL_MS,
-            config.connectivityStabilizationIntervalMs
-          );
-          connectivityPollTimer = setInterval(() => {
-            metrics.connectedPeerIds =
-              pubsubClient?.getConnectedPeerIds?.() ?? [];
-            metrics.connectedPeerCount = metrics.connectedPeerIds.length;
+        }
+        const pollIntervalMs = connectivityMonitor
+          ? Math.min(
+              MAX_CONNECTIVITY_POLL_INTERVAL_MS,
+              config.connectivityStabilizationIntervalMs
+            )
+          : MAX_CONNECTIVITY_POLL_INTERVAL_MS;
+        const updatePeerMetrics = () => {
+          const peerIds = pubsubClient?.getConnectedPeerIds?.();
+          metrics.connectedPeerIds = peerIds ?? [];
+          metrics.connectedPeerCount =
+            peerIds?.length ?? pubsubClient?.getConnectedPeerCount?.() ?? 0;
+          if (connectivityMonitor) {
             connectivityMonitor.notify();
             metrics.pauseCount = connectivityMonitor.getMetrics().pauseCount;
             metrics.resumeCount = connectivityMonitor.getMetrics().resumeCount;
-          }, pollIntervalMs);
-          connectivityPollTimer.unref?.();
-        }
+          }
+        };
+        updatePeerMetrics();
+        connectivityPollTimer = setInterval(updatePeerMetrics, pollIntervalMs);
+        connectivityPollTimer.unref?.();
 
         runPromise = (async () => {
           for await (const message of consumerStream!) {

@@ -112,7 +112,7 @@ Signature, timestamp and nonce validation apply in every mode.
 
 - `GET /health` on every service returns `{"status":"ok"}` (CORS-enabled).
 - `GET /` on the endpoint serves a status page listing each service's health, plus online sensors, libp2p peers and anchored messages.
-- The status page resolves service URLs from the hostname in the browser's address bar, so open it using the same host name that exposes the services' health ports (default ports: endpoint 3000, pubsub-broadcaster 3020, heartbeat-tracker 3030, batcher 3041, blockchain-anchor 3050).
+- The status dashboard is served by endpoint at `/`. Browsers call only its same-origin `/api/status*` routes; in production configure the private Cloud Run HTTPS URLs and IAM invocation permissions on the endpoint. Local development uses the default service ports on loopback.
 - `GET /metrics` returns JSON counters on endpoint, heartbeat-tracker, pubsub-broadcaster, batcher and blockchain-anchor.
 
 ## Sensors payload proto 

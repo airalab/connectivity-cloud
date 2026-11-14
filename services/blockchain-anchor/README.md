@@ -59,6 +59,8 @@ Environment variables:
 - `BLOCKCHAIN_ANCHOR_SURI` - **Required** - Account seed/mnemonic for signing transactions
 - `SUBSTRATE_WS_URL` - Substrate WebSocket endpoint (default: `ws://localhost:9944`)
 - `BLOCKCHAIN_ANCHOR_HEALTH_PORT` - Health check server port (default: `3050`); Cloud Run `PORT` takes precedence
+- `BLOCKCHAIN_ANCHOR_STATUS_REDIS_KEY` - Redis hash used for the last finalized batch observation (default: `blockchain-anchor:v1:last-finalized`)
+- `BLOCKCHAIN_ANCHOR_OBSERVATION_STALE_MS` - Age after which the last finalized batch is labeled stale (default: 24 hours)
 - `ANCHOR_MAX_PAYLOAD_BYTES` - Maximum accepted compressed payload size in bytes (default: `8192`, shared default defined in `@scp/core`)
 - `LOG_LEVEL` - Logging level (default: `info`)
 
@@ -117,6 +119,27 @@ curl http://localhost:3050/health
 ```bash
 curl http://localhost:3050/metrics
 ```
+
+## Private status endpoint
+
+`GET /status` is a private, read-only monitoring route. It reports real Kafka
+consumer-group lag for `telemetry.batched.v1` using the configured anchor group,
+free balance for the transaction signer using the chain's token metadata, best
+and finalized block heights, finalization gap, and the persisted last finalized
+batch observation. Kafka offset reads use the Admin API and never consume
+records or commit offsets. Missing consumer offsets and unavailable components
+are returned as `null`; status reads are cached for 15 seconds and do not affect
+service readiness.
+
+After a successful on-chain finalization, the service writes the observation to
+Redis asynchronously with a monotonic check on (block number, extrinsic index),
+so two batches finalized in the same block keep the later one while an older
+observation can never overwrite a newer one. A Redis or RPC
+observation failure is logged but does not fail the transaction or delay its
+Kafka offset commit. Duplicate skips do not update this observation. Set the
+shared `REDIS_*` connection variables used by the endpoint/heartbeat tracker
+for persistence across restarts; without Redis, the last-batch fields remain
+unavailable.
 
 Returns:
 ```json

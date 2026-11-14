@@ -24,6 +24,7 @@ import {
   createHeartbeatTrackerState,
   handleTelemetryMessage,
 } from '../src/index.js';
+import { FakeRedis } from './fake-redis.js';
 
 function createClock(start = Date.parse('2026-01-01T00:00:00Z')) {
   let current = start;
@@ -64,107 +65,6 @@ function authorizedEnvelope(
 
 function encodeSensorId(sensorId: string): string {
   return Buffer.from(sensorId.padEnd(32, '_').slice(0, 32)).toString('hex');
-}
-
-class FakeRedis {
-  private readonly hashes = new Map<string, Record<string, string>>();
-  private readonly sets = new Map<string, Set<string>>();
-
-  async hgetall(key: string): Promise<Record<string, string>> {
-    return { ...(this.hashes.get(key) ?? {}) };
-  }
-
-  async hset(key: string, map: Record<string, string>): Promise<number> {
-    const current = this.hashes.get(key) ?? {};
-    this.hashes.set(key, { ...current, ...map });
-    return Object.keys(map).length;
-  }
-
-  async sadd(key: string, member: string): Promise<number> {
-    const set = this.sets.get(key) ?? new Set<string>();
-    const before = set.size;
-    set.add(member);
-    this.sets.set(key, set);
-    return set.size > before ? 1 : 0;
-  }
-
-  async smembers(key: string): Promise<string[]> {
-    return [...(this.sets.get(key) ?? new Set<string>())];
-  }
-
-  async srem(key: string, member: string): Promise<number> {
-    const set = this.sets.get(key);
-    if (!set) return 0;
-    const deleted = set.delete(member) ? 1 : 0;
-    if (set.size === 0) {
-      this.sets.delete(key);
-    }
-    return deleted;
-  }
-
-  async del(key: string): Promise<number> {
-    const existed = this.hashes.has(key) ? 1 : 0;
-    this.hashes.delete(key);
-    return existed;
-  }
-
-  /**
-   * Test double for the heartbeat compare-and-set Lua script used in
-   * production. Mirrors its semantics: `lastSeen` only advances when the
-   * incoming event timestamp is strictly newer than what is stored.
-   */
-  async eval(
-    _script: string,
-    numkeys: number,
-    ...rest: Array<string | number>
-  ): Promise<[number, number, number, number, number]> {
-    const keys = rest.slice(0, numkeys) as string[];
-    const args = rest.slice(numkeys);
-    const [key, sensorsKey] = keys;
-    const [sensorId, eventTimeRaw, onlineWindowMsRaw] = args;
-    const eventTime = Number(eventTimeRaw);
-    const onlineWindowMs = Number(onlineWindowMsRaw);
-
-    if (key === undefined || sensorsKey === undefined) {
-      throw new Error('missing keys for eval');
-    }
-    if (typeof sensorId !== 'string') {
-      throw new Error('missing sensorId arg for eval');
-    }
-
-    await this.sadd(sensorsKey, sensorId);
-
-    const existing = this.hashes.get(key) ?? {};
-    const lastSeen = Number.parseInt(existing.lastSeen ?? '', 10);
-    const firstSeen = Number.parseInt(existing.firstSeen ?? '', 10);
-    const onlineSince = Number.parseInt(existing.onlineSince ?? '', 10);
-    const hasLastSeen = Number.isFinite(lastSeen);
-    const hasFirstSeen = Number.isFinite(firstSeen);
-    const hasOnlineSince = Number.isFinite(onlineSince);
-    const isNew = hasFirstSeen ? 0 : 1;
-
-    if (!hasLastSeen || eventTime > lastSeen) {
-      const newFirstSeen = hasFirstSeen ? firstSeen : eventTime;
-      let newOnlineSince = hasOnlineSince ? onlineSince : eventTime;
-      if (hasLastSeen && eventTime - lastSeen > onlineWindowMs) {
-        newOnlineSince = eventTime;
-      }
-      this.hashes.set(key, {
-        firstSeen: String(newFirstSeen),
-        lastSeen: String(eventTime),
-        onlineSince: String(newOnlineSince),
-      });
-      return [1, isNew, newFirstSeen, eventTime, newOnlineSince];
-    }
-
-    return [
-      0,
-      isNew,
-      hasFirstSeen ? firstSeen : eventTime,
-      lastSeen,
-      hasOnlineSince ? onlineSince : eventTime,
-    ];
-  }
 }
 
 describe('heartbeat tracker state', () => {

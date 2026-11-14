@@ -25,9 +25,9 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 
 `Trusted Messages (Kafka) -> Batcher -> Message Bus (Kafka) -> Blockchain Anchor -> Robonomics Blockchain`
 
-### Status page flow
+### Status dashboard flow
 
-`Browser -> Endpoint GET / (static HTML) -> browser polls each service's /health and /metrics directly`
+`Browser -> Endpoint GET / (static HTML) -> same-origin /api/status* -> endpoint Status Collector -> IAM-authenticated private service URLs`
 
 ## Module responsibilities
 
@@ -87,20 +87,14 @@ The system accepts Ed25519-signed environmental sensor telemetry (Altruist-serie
 - Commits offset only after blockchain submission confirmation (or a confirmed idempotent skip/rejection).
 - Emitting an anchoring result event (`telemetry.blockchain.result.v1`) is deferred to a future phase.
 
-### Status page
-- Served by the Endpoint at `GET /` as a static, dependency-free HTML page; the server performs no probing and renders identical markup on every request.
-- Branded with the official Robonomics Network logo, inlined as SVG (black variant in light mode, white variant in dark mode via `prefers-color-scheme`), so the page needs no external assets.
-- An inline script polls each service's `/health` directly from the browser every 5s and shows each service's status (Operational / Unreachable).
-- Service URLs are built from `window.location.hostname` (the host the page was loaded from) plus the per-service health port, so no host configuration is needed.
-- A metrics section polls `/metrics` for three headline numbers:
-
-| Metric | Source service | Field |
-| --- | --- | --- |
-| Online sensors | heartbeat-tracker | `sensors_online` |
-| libp2p peers | pubsub-broadcaster | `connectedPeerCount` |
-| Anchored messages | blockchain-anchor | `anchored` |
-
-- Because the browser calls services cross-origin, `/health` (all services) and `/metrics` (endpoint, heartbeat-tracker, pubsub-broadcaster, blockchain-anchor) send `access-control-allow-origin: *`. Health ports must therefore be reachable from the browser.
+### Status dashboard
+- The Endpoint serves one self-contained static HTML page at `GET /`, with accessible Overview, Sensors, and Network tabs, hash deep links, and light/dark Robonomics branding.
+- The browser calls only same-origin `/api/status`, `/api/status/sensors`, and `/api/status/network`; it lazy-loads detail tabs and refreshes the active tab every 30 seconds.
+- The Endpoint Status Collector calls operator-configured private Cloud Run URLs using ADC-signed OIDC ID tokens. It uses bounded probes, per-instance TTL caches, single-flight requests, and safe public DTOs. Caches are not synchronized across Cloud Run instances.
+- Readiness (`/ready`), not liveness (`/health`), determines service state. Transport failures require repeated observations before outage; IAM failures and missing configuration are unknown.
+- Sensor IDs are public hex values. The Sensors API returns bounded cursor-based pages and no SS58 address or sensors.social URL; the browser validates the ID, converts it to SS58 prefix 32, and creates the external link.
+- Network reports reserved peer counts and process-local counters separately from blockchain Kafka lag, persisted last-finalized-batch observation, signer balance, and chain block heads. Kafka lag uses read-only Admin offset queries; finalized observations are persisted best-effort in Redis after finality.
+- Status collection does not require CORS or public access to private service ports.
 
 | Service | Display name | Default port | Env var |
 | --- | --- | --- | --- |
