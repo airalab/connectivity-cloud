@@ -345,7 +345,9 @@ function parseAnchorStatus(
   };
   const status = {
     queuedBatches: read('queuedBatches', nonNegativeNumber),
-    lastFinalizedAt: read('lastFinalizedAt', text),
+    lastFinalizedAt: read('lastFinalizedAt', (value) =>
+       validTimestamp(value) ? value : null
+    ),
     lastFinalizedObservationStale: read('lastFinalizedObservationStale', flag),
     lastFinalizedBlock: read('lastFinalizedBlock', text),
     lastBatchId: read('lastBatchId', text),
