@@ -43,8 +43,8 @@ describe('renderStatusPage', () => {
     const html = renderStatusPage();
 
     expect(html).toContain("'/api/status'");
-    expect(html).toContain("'/api/status' + (activeTab");
-    expect(html).toContain("'/' + activeTab");
+    expect(html).toContain("'/api/status' + (requestedTab");
+    expect(html).toContain("'/' + requestedTab");
     expect(html).toContain('}, 30000)');
     expect(html).not.toContain('window.location.hostname');
     expect(html).not.toMatch(/fetch\(['"]https?:\/\//);
