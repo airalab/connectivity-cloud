@@ -4,9 +4,10 @@ This runbook covers running the telemetry pipeline on **Cloud Run** with autosca
 
 ```text
 sensor -> endpoint (Cloud Run, 1..5 instances)
-            |-- Redis TLS + AUTH --> Memorystore  (nonce:v1:*, heartbeat-tracker:v1:*)
-            |-- Kafka TLS + SASL  --> Managed Kafka (every producer and consumer)
-            `-- WSS --------------> wss://polkadot.rpc.robonomics.network   (CPS auth only)
+            |-- Redis TLS + AUTH --> Memorystore (nonces, heartbeat state, anchor observation)
+            |-- Kafka TLS + SASL  --> Managed Kafka
+            |-- OIDC/HTTPS -------> private Cloud Run services (status collection)
+            `-- WSS --------------> Robonomics RPC (CPS auth / blockchain-anchor)
 ```
 
 ## Services and scaling
@@ -28,15 +29,18 @@ Cloud Run does not configure HTTP probes by default (it only checks that the con
 
 ## Networking
 
-- Use **Direct VPC egress** on the VPC that has the Memorystore instance and the Managed Kafka cluster, with `--vpc-egress=private-ranges-only` so the public CPS RPC (`wss://polkadot.rpc.robonomics.network`) still goes out over the internet.
-- Verify before go-live: DNS resolves the Kafka bootstrap and **advertised broker** names from the Cloud Run subnet, firewall rules allow TCP 9092 to the brokers and TCP 6378 to Redis, and routes exist for the Memorystore range.
-- CPS RPC is independent of the private Redis/Kafka credentials. For `SENSOR_AUTH_STRATEGY=cps` set `SUBSTRATE_WS_URL=wss://polkadot.rpc.robonomics.network` and `CPS_ROOT_ADDRESS=<identity account of the sensors.social root>`.
+- Use **Direct VPC egress** on the VPC that has Memorystore and Managed Kafka. Verify DNS, firewall rules, routes, and access to every advertised Kafka broker (TCP 9092) and Redis (TCP 6378) from each service subnet.
+- Do not assume `--vpc-egress=private-ranges-only` makes private Cloud Run service URLs reachable. With internal ingress, configure the endpoint's VPC egress/network path for Cloud Run-to-Cloud Run traffic (for example, Direct VPC egress with all traffic routed through the VPC and the required Google API/private routing). Verify that the configured URL resolves and that an authenticated request succeeds from the deployed endpoint revision. Test after any ingress, VPC, DNS, or egress change.
+- All-traffic VPC egress also changes outbound RPC routing. Provide Cloud NAT for public Robonomics RPC access where required, and Private Google Access for Google APIs as appropriate to the subnet. Validate Redis, Managed Kafka, Cloud Run IAM token acquisition, and Robonomics RPC independently; do not make a public service URL or unauthenticated fallback just to work around routing.
+- Only `endpoint` is public. Set the other four services to internal ingress and require IAM authentication. Grant the endpoint runtime identity `roles/run.invoker` on each private service. Configure `PUBSUB_BROADCASTER_URL`, `HEARTBEAT_TRACKER_URL`, `BATCHER_URL`, and `BLOCKCHAIN_ANCHOR_URL` on the endpoint with each service's HTTPS URL; these URLs are server-side configuration and are never exposed to the browser. The endpoint sends Google-signed OIDC ID tokens with the target URL as audience using ADC (no service-account key). Tokens are only sent to origins allowed by `STATUS_ALLOWED_UPSTREAM_HOSTS` (exact hostnames or `*.suffix`), or to Cloud Run `*.run.app` hostnames when it is unset; set it to pin the exact service hostnames.
+- CPS RPC is independent of private Redis/Kafka credentials. For `SENSOR_AUTH_STRATEGY=cps` set `SUBSTRATE_WS_URL=wss://polkadot.rpc.robonomics.network` and `CPS_ROOT_ADDRESS=<identity account of the sensors.social root>`.
 
 ## Identity and secrets
 
 Use one runtime service account per deployment with least privilege:
 
 - Kafka: `roles/managedkafka.client` on the project. Authentication uses the Cloud Run service-account identity via Application Default Credentials; **do not** ship a service-account JSON key (`GOOGLE_APPLICATION_CREDENTIALS` is rejected at startup). Restrict topics/consumer groups with Kafka ACLs where supported.
+- The blockchain-anchor status Admin client needs read-only metadata, end-offset, and consumer-group offset permissions for `telemetry.batched.v1` and `BLOCKCHAIN_ANCHOR_GROUP_ID`. It does not consume records or commit offsets.
 - Secret Manager: `roles/secretmanager.secretAccessor` only on the Redis AUTH secret and the Redis CA secret.
 - Never put the Redis AUTH string or certificates in `.env`, the Dockerfile, Cloud Build substitutions or build arguments.
 
@@ -47,28 +51,32 @@ gcloud beta run deploy scp-endpoint \
   --min-instances 1 --max-instances 5 --port 8080 \
   --startup-probe=httpGet.path=/ready,httpGet.port=8080,periodSeconds=5,timeoutSeconds=3,failureThreshold=24 \
   --liveness-probe=httpGet.path=/health,httpGet.port=8080,periodSeconds=30,timeoutSeconds=3,failureThreshold=3 \
-  --network VPC --subnet SUBNET --vpc-egress private-ranges-only \
+  --ingress all \
+  --network VPC --subnet SUBNET --vpc-egress all \
   --set-env-vars "SENSOR_AUTH_STRATEGY=cps,SUBSTRATE_WS_URL=wss://polkadot.rpc.robonomics.network,CPS_ROOT_ADDRESS=<root>" \
+  --set-env-vars "PUBSUB_BROADCASTER_URL=https://<pubsub-service-url>,HEARTBEAT_TRACKER_URL=https://<heartbeat-service-url>,BATCHER_URL=https://<batcher-service-url>,BLOCKCHAIN_ANCHOR_URL=https://<anchor-service-url>" \
+  --set-env-vars "STATUS_CACHE_TTL_MS=30000,STATUS_PROBE_TIMEOUT_MS=5000,STATUS_FAILURE_THRESHOLD=3" \
   --set-env-vars "KAFKA_BROKERS=<managed-kafka-bootstrap>:9092,KAFKA_SECURITY_PROTOCOL=SASL_SSL,KAFKA_SASL_MECHANISM=OAUTHBEARER,KAFKA_AUTH_PROVIDER=google-adc" \
   --set-env-vars "REDIS_URL=rediss://<memorystore-ip>:6378,REDIS_TLS_CA_PATH=/var/run/secrets/redis/ca.pem,NONCE_TTL_SECONDS=900" \
   --set-secrets "REDIS_AUTH_PASSWORD=redis-auth:latest,/var/run/secrets/redis/ca.pem=redis-ca:latest"
 ```
 
-Use the same `--port`, `--startup-probe` and `--liveness-probe` flags for the other four services. Cloud Run has no separate readiness probe: the endpoint's `/ready` is checked at startup, so a revision that cannot reach Redis or Kafka never receives traffic. Do not set `SCP_ALLOW_INSECURE_LOCAL` in Cloud Run: it is rejected when `NODE_ENV=production` (set by the image).
+The command is an example, not a production-ready network recipe: validate VPC routing, Cloud NAT/Private Google Access, and Cloud Run-to-Cloud Run reachability in the target project. The endpoint is the only service deployed with `--ingress all`; deploy `pubsub-broadcaster`, `heartbeat-tracker`, `batcher`, and `blockchain-anchor` with `--ingress internal --no-allow-unauthenticated`, the same health probes, and their service-specific least-privilege accounts. Grant the endpoint account `roles/run.invoker` on those four services. Set each private service URL on the endpoint as described above. Cloud Run has no separate readiness probe: `/ready` is a startup check, not a global dashboard. Do not set `SCP_ALLOW_INSECURE_LOCAL` in Cloud Run: it is rejected when `NODE_ENV=production` (set by the image).
 
 ## Memorystore for Redis
 
 - Create the instance **with AUTH and in-transit encryption**: `--enable-auth --transit-encryption-mode=SERVER_AUTHENTICATION`. TLS cannot be enabled in place later.
 - Clients connect over TLS (port `6378`) with the AUTH string and verify the server certificate against the **instance CA** (download it from the instance's server CA certs and store it in Secret Manager). Certificate verification is never disabled.
 - Hostname verification: Memorystore addresses are IPs. If the certificate does not list the IP in its SAN, set `REDIS_TLS_SERVERNAME` to a name that does appear in the certificate instead of turning verification off. Confirm this against the current Memorystore connection guidance.
-- The endpoint (`nonce:v1:*`) and the heartbeat-tracker (`heartbeat-tracker:v1:*`) share the instance with separate prefixes. Enable TLS + AUTH on the instance *and* roll out the heartbeat-tracker with the same `REDIS_*` settings at the same time, otherwise the running tracker loses its connection.
+- The endpoint (`nonce:v1:*`), heartbeat-tracker (`heartbeat-tracker:v1:*`), and blockchain-anchor status observation (`blockchain-anchor:v1:last-finalized`) share the instance with separate keys. Enable TLS + AUTH on the instance and roll out every service that uses it with the same `REDIS_*` settings. The anchor's observation write is best-effort and does not participate in transaction or Kafka commit semantics.
 
-### Replay-protection semantics (read before tuning)
+### Replay-protection and anchor observations
 
 - Claim = `SET nonce:v1:<sha256> <token> NX EX NONCE_TTL_SECONDS`, made **before** publishing to Kafka.
 - `NONCE_TTL_SECONDS` must be at least `2 x ENDPOINT_TIMESTAMP_SKEW_SECONDS + 60`; the service refuses to start otherwise.
 - Redis errors return `503 nonce_store_unavailable` (nothing is published). Kafka failures return `503 kafka_unavailable` and **keep** the claim, because the broker may have accepted the event.
 - A crash between the claim and the Kafka publish suppresses retries of that envelope until the TTL expires. This is a deliberate conservative trade-off; exactly-once delivery across Redis and Kafka would need an outbox and is out of scope.
+- Blockchain-anchor's last finalized batch uses a separate Redis hash and best-effort monotonic writes. The write runs outside Kafka commit/transaction success handling; Redis failures are visible as an unavailable observation, not an anchor failure.
 
 ## Managed Service for Apache Kafka
 
@@ -88,6 +96,7 @@ Use the same `--port`, `--startup-probe` and `--liveness-probe` flags for the ot
 
 - `/ready` returns only the names of failing dependencies; details are logged without credentials. Connection strings are logged with credentials redacted and passwords are never logged.
 - `/metrics` includes `duplicateNonces`, `nonceStoreErrors` and `kafkaErrors`. Alert on a sustained `nonceStoreErrors` increase (Redis outage or credential problem).
+- The status collector caches snapshots in memory per endpoint instance; it is not a globally consistent history or a global aggregation of process-local counters.
 
 ## Local development
 
@@ -109,3 +118,10 @@ These cannot run in CI without a Google Cloud project; run them before the first
 3. `sensor -> CPS WSS -> Redis claim -> authenticated Kafka publish -> 202` using `pnpm fake-sensor`.
 4. Send the identical envelope again (also via a different instance): expect `409 duplicate_nonce` and exactly one event on `telemetry.authorized.v1`.
 5. Break Redis AUTH on a test revision: expect `/ready` 503 and startup failure, not an insecure fallback.
+6. Status dashboard (staging, with all four private services on internal ingress and the endpoint on all-traffic Direct VPC egress):
+   - From outside the VPC, `curl` a private service URL directly: expect `403`/`404` (ingress blocks it), not a response body.
+   - `curl -H "Authorization: Bearer $(gcloud auth print-identity-token --audiences=<service-url>)" <service-url>/ready` from a VM in the VPC: expect `200`; without the header: `401`/`403`.
+   - Without `roles/run.invoker` for the endpoint identity, `GET /api/status` must show the service as `unknown` (not `operational`); after granting it, `operational`.
+   - Set `HEARTBEAT_TRACKER_URL` to a hostname outside `STATUS_ALLOWED_UPSTREAM_HOSTS`: the service must show `unknown` and the target must receive no request.
+   - `GET /api/status/sensors?limit=50` returns `available: true` with at most 50 sensors; stop the heartbeat-tracker revision and confirm the next refresh reports `stale: true` (then `available: false` after `STATUS_STALE_MAX_AGE_MS`) and that the dashboard shows the stale banner.
+   - Anchor two batches that finalize in the same block and confirm `/api/status/network` shows the later batch ID.

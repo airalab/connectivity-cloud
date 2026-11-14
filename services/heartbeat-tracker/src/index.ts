@@ -57,6 +57,38 @@ interface HeartbeatTrackerMetrics {
   avg_uptime_seconds: number;
 }
 
+export interface HeartbeatSensorPageOptions {
+  limit?: number;
+  cursor?: string;
+  filter?: string;
+}
+
+export interface HeartbeatSensorPage {
+  observedAt: string;
+  limit: number;
+  total: number;
+  nextCursor: string | null;
+  /** True when uptime statistics were computed from a bounded sample of online sensors. */
+  uptimeSummarySampled: boolean;
+  summary: Pick<
+    HeartbeatTrackerMetrics,
+    | 'sensors_online'
+    | 'sensors_total_tracked'
+    | 'avg_uptime_seconds'
+    | 'max_uptime_seconds'
+    | 'online_window_ms'
+  >;
+  sensors: HeartbeatTrackerMetrics['sensors_uptime'];
+}
+
+/** Hard cap on sensors returned (and read from Redis) per page. */
+export const MAX_SENSOR_PAGE_LIMIT = 100;
+const DEFAULT_SENSOR_PAGE_LIMIT = 50;
+/** Maximum online sensors read from Redis to compute uptime statistics. */
+export const UPTIME_SUMMARY_SAMPLE_LIMIT = 500;
+/** Maximum stale sensors pruned per page request. */
+const PRUNE_BATCH_SIZE = 100;
+
 export interface HeartbeatTrackerService {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -69,13 +101,23 @@ export interface HeartbeatTrackerState {
     eventTimestampMs: number
   ): Promise<void>;
   createMetrics(consumed: number): Promise<HeartbeatTrackerMetrics>;
+  /**
+   * Reads one page of sensors using the last-seen index. Redis work is bounded
+   * by the page size (plus a fixed uptime sample), independent of fleet size.
+   */
+  getSensorPage(
+    options?: HeartbeatSensorPageOptions
+  ): Promise<HeartbeatSensorPage>;
 }
 
 interface HeartbeatTrackerDeps {
   createConsumer?: () => Consumer;
   createHealthServer?: (
     getMetrics: () => Promise<HeartbeatTrackerMetrics>,
-    port: number
+    port: number,
+    getSensorPage?: (
+      options: HeartbeatSensorPageOptions
+    ) => Promise<HeartbeatSensorPage>
   ) => Server;
   redis?: RedisLike;
   now?: () => number;
@@ -86,6 +128,28 @@ interface RedisLike {
   hset(key: string, map: Record<string, string>): Promise<number>;
   sadd(key: string, member: string): Promise<number>;
   smembers(key: string): Promise<string[]>;
+  zcount(
+    key: string,
+    min: number | string,
+    max: number | string
+  ): Promise<number>;
+  zrevrangebyscore(
+    key: string,
+    max: number | string,
+    min: number | string,
+    limitToken: 'LIMIT',
+    offset: number,
+    count: number
+  ): Promise<string[]>;
+  zrangebyscore(
+    key: string,
+    min: number | string,
+    max: number | string,
+    limitToken: 'LIMIT',
+    offset: number,
+    count: number
+  ): Promise<string[]>;
+  zrem(key: string, ...members: string[]): Promise<number>;
   srem(key: string, member: string): Promise<number>;
   del(key: string): Promise<number>;
   eval(
@@ -108,6 +172,7 @@ interface RedisLike {
  *
  * KEYS[1] = sensor hash key
  * KEYS[2] = sensors set key
+ * KEYS[3] = last-seen sorted set (score = lastSeen ms), used for paging
  * ARGV[1] = sensor id
  * ARGV[2] = event timestamp (ms)
  * ARGV[3] = online window (ms)
@@ -117,6 +182,7 @@ interface RedisLike {
 const HEARTBEAT_CAS_SCRIPT = `
 local key = KEYS[1]
 local sensorsKey = KEYS[2]
+local lastSeenIndexKey = KEYS[3]
 local sensorId = ARGV[1]
 local eventTime = tonumber(ARGV[2])
 local onlineWindowMs = tonumber(ARGV[3])
@@ -143,6 +209,7 @@ if lastSeen == nil or eventTime > lastSeen then
     newOnlineSince = eventTime
   end
   redis.call('HSET', key, 'firstSeen', newFirstSeen, 'lastSeen', eventTime, 'onlineSince', newOnlineSince)
+  redis.call('ZADD', lastSeenIndexKey, eventTime, sensorId)
   return {1, isNew, newFirstSeen, eventTime, newOnlineSince}
 end
 
@@ -184,6 +251,7 @@ function logError(
 function createHeartbeatTrackerKeyspace(prefix: string) {
   return {
     sensors: `${prefix}:sensors`,
+    lastSeenIndex: `${prefix}:sensors:last-seen`,
     sensor: (sensorId: string) => `${prefix}:sensor:${sensorId}`,
   };
 }
@@ -205,9 +273,10 @@ export function createHeartbeatTrackerState(
       const key = keyspace.sensor(sensorId);
       const result = (await redis.eval(
         HEARTBEAT_CAS_SCRIPT,
-        2,
+        3,
         key,
         keyspace.sensors,
+        keyspace.lastSeenIndex,
         sensorId,
         eventTimestampMs,
         onlineWindowMs
@@ -233,6 +302,153 @@ export function createHeartbeatTrackerState(
           event_timestamp_ms: eventTimestampMs,
         });
       }
+    },
+    async getSensorPage(
+      options: HeartbeatSensorPageOptions = {}
+    ): Promise<HeartbeatSensorPage> {
+      const currentTime = now();
+      const limit = Math.min(
+        Number.isSafeInteger(options.limit) && (options.limit ?? 0) > 0
+          ? options.limit!
+          : DEFAULT_SENSOR_PAGE_LIMIT,
+        MAX_SENSOR_PAGE_LIMIT
+      );
+      const parsedCursor = Number.parseInt(options.cursor ?? '0', 10);
+      const offset =
+        Number.isSafeInteger(parsedCursor) && parsedCursor >= 0
+          ? parsedCursor
+          : 0;
+      const filter =
+        options.filter === 'online' || options.filter === 'offline'
+          ? options.filter
+          : 'all';
+      const onlineCutoff = currentTime - onlineWindowMs;
+      const retentionCutoff = Math.min(
+        currentTime - retentionWindowMs,
+        onlineCutoff
+      );
+
+      const staleIds = await redis.zrangebyscore(
+        keyspace.lastSeenIndex,
+        '-inf',
+        `(${retentionCutoff}`,
+        'LIMIT',
+        0,
+        PRUNE_BATCH_SIZE
+      );
+      if (staleIds.length > 0) {
+        logInfo('pruning stale sensors from Redis', {
+          stale_count: staleIds.length,
+        });
+        await Promise.all(
+          staleIds.map(async (sensorId) => {
+            await redis.srem(keyspace.sensors, sensorId);
+            await redis.del(keyspace.sensor(sensorId));
+            await redis.zrem(keyspace.lastSeenIndex, sensorId);
+          })
+        );
+      }
+
+      const [onlineCount, visibleCount] = await Promise.all([
+        redis.zcount(keyspace.lastSeenIndex, onlineCutoff, '+inf'),
+        redis.zcount(keyspace.lastSeenIndex, retentionCutoff, '+inf'),
+      ]);
+      const total =
+        filter === 'online'
+          ? onlineCount
+          : filter === 'offline'
+            ? visibleCount - onlineCount
+            : visibleCount;
+      const max = filter === 'offline' ? `(${onlineCutoff}` : '+inf';
+      const min = filter === 'online' ? onlineCutoff : retentionCutoff;
+
+      const readSensors = async (
+        ids: string[],
+        onlyOnline: boolean
+      ): Promise<HeartbeatTrackerMetrics['sensors_uptime']> => {
+        const heartbeats = await Promise.all(
+          ids.map((sensorId) => redis.hgetall(keyspace.sensor(sensorId)))
+        );
+        const details: HeartbeatTrackerMetrics['sensors_uptime'] = [];
+        ids.forEach((sensorId, index) => {
+          const heartbeat = heartbeats[index];
+          const firstSeen = Number.parseInt(heartbeat?.firstSeen ?? '', 10);
+          const lastSeen = Number.parseInt(heartbeat?.lastSeen ?? '', 10);
+          const onlineSince = Number.parseInt(heartbeat?.onlineSince ?? '', 10);
+          if (
+            !Number.isFinite(firstSeen) ||
+            !Number.isFinite(lastSeen) ||
+            !Number.isFinite(onlineSince)
+          ) {
+            return;
+          }
+          const online = currentTime - lastSeen <= onlineWindowMs;
+          if (onlyOnline && !online) return;
+          details.push({
+            sensor_id: sensorId,
+            online,
+            first_seen: new Date(firstSeen).toISOString(),
+            last_seen: new Date(lastSeen).toISOString(),
+            uptime_seconds: online
+              ? Math.max(0, (currentTime - onlineSince) / 1000)
+              : 0,
+            seconds_since_last_seen: Math.max(
+              0,
+              (currentTime - lastSeen) / 1000
+            ),
+          });
+        });
+        return details;
+      };
+
+      const [pageIds, sampleIds] = await Promise.all([
+        total > offset
+          ? redis.zrevrangebyscore(
+              keyspace.lastSeenIndex,
+              max,
+              min,
+              'LIMIT',
+              offset,
+              limit
+            )
+          : Promise.resolve([] as string[]),
+        onlineCount > 0
+          ? redis.zrevrangebyscore(
+              keyspace.lastSeenIndex,
+              '+inf',
+              onlineCutoff,
+              'LIMIT',
+              0,
+              UPTIME_SUMMARY_SAMPLE_LIMIT
+            )
+          : Promise.resolve([] as string[]),
+      ]);
+      const [sensors, sample] = await Promise.all([
+        readSensors(pageIds, false),
+        readSensors(sampleIds, true),
+      ]);
+      const uptimes = sample.map((sensor) => sensor.uptime_seconds);
+      const nextOffset = offset + pageIds.length;
+
+      return {
+        observedAt: new Date(currentTime).toISOString(),
+        limit,
+        total,
+        nextCursor:
+          pageIds.length > 0 && nextOffset < total ? String(nextOffset) : null,
+        uptimeSummarySampled: onlineCount > sampleIds.length,
+        summary: {
+          sensors_online: onlineCount,
+          sensors_total_tracked: visibleCount,
+          avg_uptime_seconds:
+            uptimes.length > 0
+              ? uptimes.reduce((sum, value) => sum + value, 0) / uptimes.length
+              : 0,
+          max_uptime_seconds: uptimes.length > 0 ? Math.max(...uptimes) : 0,
+          online_window_ms: onlineWindowMs,
+        },
+        sensors,
+      };
     },
     async createMetrics(consumed: number): Promise<HeartbeatTrackerMetrics> {
       const currentTime = now();
@@ -317,6 +533,7 @@ export function createHeartbeatTrackerState(
           staleSensorIds.map(async (sensorId) => {
             await redis.srem(keyspace.sensors, sensorId);
             await redis.del(keyspace.sensor(sensorId));
+            await redis.zrem(keyspace.lastSeenIndex, sensorId);
           })
         );
       }
@@ -430,6 +647,12 @@ export function createHeartbeatTrackerService(
     hset: (key, map) => requireRedis().hset(key, map),
     sadd: (key, member) => requireRedis().sadd(key, member),
     smembers: (key) => requireRedis().smembers(key),
+    zcount: (key, min, max) => requireRedis().zcount(key, min, max),
+    zrevrangebyscore: (key, max, min, limitToken, offset, count) =>
+      requireRedis().zrevrangebyscore(key, max, min, limitToken, offset, count),
+    zrangebyscore: (key, min, max, limitToken, offset, count) =>
+      requireRedis().zrangebyscore(key, min, max, limitToken, offset, count),
+    zrem: (key, ...members) => requireRedis().zrem(key, ...members),
     srem: (key, member) => requireRedis().srem(key, member),
     del: (key) => requireRedis().del(key),
     eval: (script, numkeys, ...args) =>
@@ -498,7 +721,11 @@ export function createHeartbeatTrackerService(
           topics: [TELEMETRY_TOPICS.AUTHORIZED],
           autocommit: true,
         });
-        healthServer = createHealthServer(getMetrics, config.healthPort);
+        healthServer = createHealthServer(
+          getMetrics,
+          config.healthPort,
+          (options) => tracker.getSensorPage(options)
+        );
 
         runPromise = (async () => {
           for await (const message of consumerStream!) {
@@ -574,7 +801,10 @@ export function createHeartbeatTrackerService(
 
 export function startHealthAndMetricsServer(
   getMetrics: () => Promise<HeartbeatTrackerMetrics>,
-  port: number
+  port: number,
+  getSensorPage?: (
+    options: HeartbeatSensorPageOptions
+  ) => Promise<HeartbeatSensorPage>
 ): Server {
   const server = createServer(async (request, response) => {
     // The server starts listening only after the Kafka consumer is running,
@@ -610,6 +840,33 @@ export function startHealthAndMetricsServer(
         response.setHeader('content-type', 'application/json; charset=utf-8');
         response.end(JSON.stringify({ error: 'failed to collect metrics' }));
         logError('failed to collect metrics', error);
+      }
+      return;
+    }
+
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    if (url.pathname === '/status/sensors' && getSensorPage) {
+      try {
+        const requestedLimit = Number(url.searchParams.get('limit'));
+        const cursor = url.searchParams.get('cursor');
+        const filter = url.searchParams.get('filter');
+        const page = await getSensorPage({
+          ...(Number.isSafeInteger(requestedLimit)
+            ? { limit: requestedLimit }
+            : {}),
+          ...(cursor !== null ? { cursor } : {}),
+          ...(filter !== null ? { filter } : {}),
+        });
+        response.statusCode = 200;
+        response.setHeader('content-type', 'application/json; charset=utf-8');
+        response.end(JSON.stringify(page));
+      } catch (error) {
+        response.statusCode = 500;
+        response.setHeader('content-type', 'application/json; charset=utf-8');
+        response.end(
+          JSON.stringify({ error: 'failed to collect sensor status' })
+        );
+        logError('failed to collect sensor status', error);
       }
       return;
     }

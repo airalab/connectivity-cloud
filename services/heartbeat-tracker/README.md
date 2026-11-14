@@ -76,3 +76,25 @@ Example:
   "avg_uptime_seconds": 24.5
 }
 ```
+
+### `GET /status/sensors`
+
+Private read-only status endpoint used by the endpoint collector. It returns
+a heartbeat summary with a bounded sensor list, sorted online-first and
+most-recently-seen within each group. `limit` defaults to 50 and is capped at
+100; `cursor` is a server-side numeric offset and `filter` accepts `all`,
+`online`, or `offline`. The response contains `total`, `nextCursor`,
+`observedAt`, `summary`, `uptimeSummarySampled`, and the selected `sensors`
+only. It does not create SS58 addresses or external URLs.
+
+Pagination limits Redis work, not just response size. Each heartbeat also
+updates the `<prefix>:sensors:last-seen` sorted set (score = last-seen
+milliseconds); because a sensor is online exactly when its last-seen time is
+within the online window, online/offline filtering, ordering, and counts are
+`ZCOUNT`/`ZREVRANGEBYSCORE ... LIMIT` range reads. A request reads at most one
+page of sensor hashes plus a sample of up to 500 online sensors used for the
+average/maximum uptime (`uptimeSummarySampled` is `true` when more sensors are
+online than the sample covers), and prunes at most 100 expired sensors. The index
+is populated as sensors send heartbeats, so after upgrading, sensors that are
+already offline appear in `/status/sensors` only after their next heartbeat
+(`/metrics` still prunes them from the legacy set).
