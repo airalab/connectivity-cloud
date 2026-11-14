@@ -641,7 +641,13 @@ export function createStatusCollector(options: StatusCollectorOptions) {
       stale: snapshot.stale,
       observedAt: page.observedAt,
       fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
-      summary: page.summary,
+summary: {
+        sensorsOnline: page.summary.sensors_online,
+        sensorsTotalTracked: page.summary.sensors_total_tracked,
+        avgUptimeSeconds: page.summary.avg_uptime_seconds,
+        maxUptimeSeconds: page.summary.max_uptime_seconds,
+        onlineWindowMs: page.summary.online_window_ms,
+      }
       uptimeSummarySampled: page.uptimeSummarySampled,
       sensors,
       total: page.total,
