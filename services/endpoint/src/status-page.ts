@@ -226,23 +226,27 @@ ${sensorIdToSs58.toString()}
 
   function refresh() {
     if (request) request.abort();
-    request = new AbortController();
-    var endpoint = '/api/status' + (activeTab === 'overview' ? '' : '/' + activeTab);
-    var status = document.getElementById(activeTab + '-message');
+    var controller = new AbortController();
+    request = controller;
+    var requestedTab = activeTab;
+    var isCurrent = function () { return request === controller && activeTab === requestedTab; };
+    var endpoint = '/api/status' + (requestedTab === 'overview' ? '' : '/' + requestedTab);
+    var status = document.getElementById(requestedTab + '-message');
     if (status) status.textContent = 'Loading…';
-    var appendSensors = activeTab === 'sensors' && appendNextSensorPage;
+    var appendSensors = requestedTab === 'sensors' && appendNextSensorPage;
     appendNextSensorPage = false;
-    if (activeTab === 'sensors') {
+    if (requestedTab === 'sensors') {
       endpoint += '?limit=50&cursor=' + encodeURIComponent(sensorCursor) +
         '&filter=' + encodeURIComponent(document.getElementById('sensor-filter').value);
     }
-    fetch(endpoint, { headers: { accept: 'application/json' }, signal: request.signal })
+    fetch(endpoint, { headers: { accept: 'application/json' }, signal: controller.signal })
       .then(function (response) {
         if (!response.ok) throw new Error('Status request failed');
         return response.json();
       })
       .then(function (data) {
-        var tab = activeTab;
+        if (!isCurrent()) return;
+        var tab = requestedTab;
         if (tab === 'overview') renderOverview(data);
         if (tab === 'sensors') renderSensors(data, appendSensors);
         if (tab === 'network') renderNetwork(data);
@@ -254,8 +258,8 @@ ${sensorIdToSs58.toString()}
         }
       })
       .catch(function (error) {
-        if (error.name === 'AbortError') return;
-        var tab = activeTab;
+        if (error.name === 'AbortError' || !isCurrent()) return;
+        var tab = requestedTab;
         var previous = loaded[tab];
         if (previous) {
           setStale(tab, 'Stale data: the latest refresh failed' + (previous.observedAt ? '. Showing the observation from ' + clock(previous.observedAt) : '') + '.');
