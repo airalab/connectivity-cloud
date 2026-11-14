@@ -20,6 +20,7 @@ const DASHBOARD_SCRIPT = String.raw`
 ${sensorIdToSs58.toString()}
 (function () {
   var activeTab = 'overview';
+  var loaded = {};
   var timer = null;
   var request = null;
   var sensorCursor = '0';
@@ -79,6 +80,41 @@ ${sensorIdToSs58.toString()}
     return Math.round(absolute / 86400) + ' days' + direction;
   }
 
+  function clock(value) {
+    var timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : 'Unavailable';
+  }
+
+  // Observation time is when the upstream state was measured; fetch time is
+  // when the collector last read it. They differ whenever cached data is served.
+  function freshness(data) {
+    var parts = [];
+    if (data.observedAt) parts.push('Observed ' + clock(data.observedAt));
+    if (data.fetchedAt && data.fetchedAt !== data.observedAt) parts.push('fetched ' + clock(data.fetchedAt));
+    if (data.stale) parts.push('STALE: latest refresh failed');
+    return parts.length ? parts.join(' · ') : 'No observation available';
+  }
+
+  function setStale(tab, message) {
+    var panel = document.getElementById(tab + '-panel');
+    var banner = document.getElementById(tab + '-stale');
+    if (panel) panel.setAttribute('data-stale', message ? 'true' : 'false');
+    if (banner) {
+      banner.hidden = !message;
+      banner.textContent = message || '';
+    }
+  }
+
+  function staleMessage(tab, data) {
+    if (tab === 'network') {
+      var stale = [];
+      if (data.pubsub && data.pubsub.stale) stale.push('libp2p');
+      if (data.blockchain && data.blockchain.stale) stale.push('blockchain');
+      return stale.length ? 'Stale data for ' + stale.join(' and ') + ': the latest refresh failed and the last good observation is shown.' : '';
+    }
+    return data.stale ? 'Stale data: the latest refresh failed and the last good observation is shown.' : '';
+  }
+
   function stateBadge(state) {
     return '<span class="badge ' + (labels[state] ? state : 'unknown') + '">' +
       (labels[state] || labels.unknown) + '</span>';
@@ -86,7 +122,7 @@ ${sensorIdToSs58.toString()}
 
   function renderOverview(data) {
     text('overall-state', labels[data.status] || labels.unknown);
-    text('overview-time', data.observedAt ? new Date(data.observedAt).toLocaleString() : 'Unavailable');
+    text('overview-time', data.observedAt ? clock(data.observedAt) : 'Unavailable');
     var list = document.getElementById('service-list');
     list.replaceChildren();
     (data.services || []).forEach(function (service) {
@@ -159,21 +195,23 @@ ${sensorIdToSs58.toString()}
       emptyRow.append(emptyCell);
       body.append(emptyRow);
     }
-    text('sensor-time', data.observedAt ? new Date(data.observedAt).toLocaleString() : 'Unavailable');
-    text('sensor-note', data.available ? (data.total + ' sensors match the ' + filter + ' filter; each page contains up to ' + data.limit + '.') : 'Sensor data is unavailable.');
+    text('sensor-time', freshness(data));
+    text('sensor-note', data.available ? (data.total + ' sensors match the ' + filter + ' filter; each page contains up to ' + data.limit + '.' + (data.uptimeSummarySampled ? ' Uptime statistics are sampled from the most recently seen online sensors.' : '')) : 'Sensor data is unavailable.');
     sensorNextCursor = data.nextCursor || null;
     document.getElementById('sensor-more').hidden = !sensorNextCursor;
   }
 
   function renderNetwork(data) {
-    text('network-time', data.observedAt ? new Date(data.observedAt).toLocaleString() : 'Unavailable');
+    text('network-time', freshness(data));
     var p = data.pubsub || {};
+    text('network-pubsub-time', p.available ? freshness(p) : 'Unavailable');
     ['connectedPeerCount', 'minConnectedPeers', 'publishSuccess', 'publishFailure', 'pauseCount', 'resumeCount'].forEach(function (key) {
       text('network-' + key, p[key]);
     });
     text('network-kafkaPaused', p.kafkaPaused == null ? null : (p.kafkaPaused ? 'Paused' : 'Running'));
     text('network-scope', p.scope === 'process-local' ? 'Process-local counters (not globally aggregated)' : 'Unavailable');
     var b = data.blockchain || {};
+    text('chain-time', b.available ? freshness(b) : 'Unavailable');
     ['queuedBatches', 'lastFinalizedAt', 'lastFinalizedBlock', 'lastBatchId', 'freeBalance', 'tokenSymbol', 'tokenDecimals', 'bestBlock', 'finalizedBlock', 'finalizationGap'].forEach(function (key) {
       text('chain-' + key, b[key]);
     });
@@ -204,13 +242,25 @@ ${sensorIdToSs58.toString()}
         return response.json();
       })
       .then(function (data) {
-        if (activeTab === 'overview') renderOverview(data);
-        if (activeTab === 'sensors') renderSensors(data, appendSensors);
-        if (activeTab === 'network') renderNetwork(data);
-        if (status) status.textContent = 'Updated ' + new Date(data.observedAt).toLocaleTimeString();
+        var tab = activeTab;
+        if (tab === 'overview') renderOverview(data);
+        if (tab === 'sensors') renderSensors(data, appendSensors);
+        if (tab === 'network') renderNetwork(data);
+        var stale = staleMessage(tab, data);
+        loaded[tab] = { observedAt: data.observedAt || null };
+        setStale(tab, stale);
+        if (status) {
+          status.textContent = (stale ? 'Showing stale data. ' : 'Refreshed ' + new Date().toLocaleTimeString() + '. ') + freshness(data);
+        }
       })
       .catch(function (error) {
-        if (error.name !== 'AbortError' && status) status.textContent = 'Data unavailable. ' + error.message;
+        if (error.name === 'AbortError') return;
+        var tab = activeTab;
+        var previous = loaded[tab];
+        if (previous) {
+          setStale(tab, 'Stale data: the latest refresh failed' + (previous.observedAt ? '. Showing the observation from ' + clock(previous.observedAt) : '') + '.');
+        }
+        if (status) status.textContent = 'Data unavailable. ' + error.message;
       });
   }
 
@@ -270,9 +320,11 @@ export function renderStatusPage(): string {
   .status-line { min-height:1.5em; margin:.5rem 0; color:var(--muted); font-size:.85rem; }
   .table-wrap { overflow-x:auto; } table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:.55rem; border-bottom:1px solid var(--line); vertical-align:top; }
   th { color:var(--muted); font-weight:600; } td.address { overflow-wrap:anywhere; word-break:break-all; font-family:ui-monospace,monospace; font-size:.82rem; }
+  .stale { margin:.5rem 0; padding:.55rem .8rem; border:1px solid #d9a400; border-radius:8px; color:#875d00; background:#fff0c2; font-weight:600; }
+  .panel[data-stale=true] .grid,.panel[data-stale=true] .service-list,.panel[data-stale=true] .table-wrap,.panel[data-stale=true] .summary { opacity:.65; }
   select { font:inherit; padding:.35rem; } [hidden] { display:none !important; }
   @media (max-width:560px) { body { margin:1.2rem auto; } .logo { margin-bottom:1rem; } th,td { padding:.4rem .3rem; font-size:.8rem; } [role=tab] { padding:.55rem; } }
-  @media (prefers-color-scheme:dark) { :root { --fg:#eee; --muted:#aaa; --bg:#111; --line:#333; --card:#191919; } .logo-light { display:none; } .logo-dark { display:block; } .badge.operational { color:#9be2bc; background:#16472f; } .badge.degraded { color:#ffe08a; background:#51400e; } .badge.outage { color:#ffb3b3; background:#511c1c; } .badge.unknown { color:#ccc; background:#333; } }
+  @media (prefers-color-scheme:dark) { :root { --fg:#eee; --muted:#aaa; --bg:#111; --line:#333; --card:#191919; } .logo-light { display:none; } .logo-dark { display:block; } .badge.operational { color:#9be2bc; background:#16472f; } .badge.degraded { color:#ffe08a; background:#51400e; } .badge.outage { color:#ffb3b3; background:#511c1c; } .badge.unknown { color:#ccc; background:#333; } .stale { color:#ffe08a; background:#51400e; border-color:#8a6d00; } }
 </style>
 </head>
 <body>
@@ -288,6 +340,7 @@ ${STATUS_LOGO_DARK_SVG}
 <section role="tabpanel" id="overview-panel" aria-labelledby="overview-tab" class="panel">
   <div class="summary"><div class="card"><strong id="overall-state">Loading…</strong><span>Overall system status</span></div>
   <div class="card"><strong id="overview-time">Unavailable</strong><span>Observation time</span></div></div>
+  <p id="overview-stale" class="stale" role="status" hidden></p>
   <h2>Service readiness</h2><div id="service-list" class="service-list"></div>
   <p id="overview-message" class="status-line" aria-live="polite">Loading…</p>
 </section>
@@ -299,6 +352,7 @@ ${STATUS_LOGO_DARK_SVG}
     <div class="card"><strong id="sensor-maxUptimeSeconds">Unavailable</strong><span>Maximum continuous uptime</span></div>
     <div class="card"><strong id="sensor-onlineWindowMs">Unavailable</strong><span>Online detection window</span></div>
   </div>
+  <p id="sensors-stale" class="stale" role="status" hidden></p>
   <h2>Sensor activity</h2>
   <label for="sensor-filter">Filter sensors </label><select id="sensor-filter"><option value="all">All</option><option value="online">Online</option><option value="offline">Offline</option></select>
   <p id="sensor-note" class="muted"></p><div class="table-wrap"><table><thead><tr><th>Sensor</th><th>Status</th><th>Last seen</th><th>Uptime</th><th>First seen</th></tr></thead><tbody id="sensor-rows"></tbody></table></div>
@@ -306,8 +360,9 @@ ${STATUS_LOGO_DARK_SVG}
   <p id="sensor-time" class="muted"></p><p id="sensors-message" class="status-line" aria-live="polite">Open tab to load sensor data.</p>
 </section>
 <section role="tabpanel" id="network-panel" aria-labelledby="network-tab" class="panel" hidden>
-  <p class="muted">Observed <span id="network-time">Unavailable</span></p>
-  <h2>libp2p / GossipSub</h2><p id="network-scope" class="muted">Unavailable</p>
+  <p class="muted" id="network-time">Unavailable</p>
+  <p id="network-stale" class="stale" role="status" hidden></p>
+  <h2>libp2p / GossipSub</h2><p id="network-pubsub-time" class="muted">Unavailable</p><p id="network-scope" class="muted">Unavailable</p>
   <div class="grid">
     <div class="card"><strong id="network-connectedPeerCount">Unavailable</strong><span>Connected reserved peers</span></div>
     <div class="card"><strong id="network-minConnectedPeers">Unavailable</strong><span>Required minimum</span></div>
@@ -317,7 +372,7 @@ ${STATUS_LOGO_DARK_SVG}
     <div class="card"><strong id="network-pauseCount">Unavailable</strong><span>Pause count</span></div>
     <div class="card"><strong id="network-resumeCount">Unavailable</strong><span>Resume count</span></div>
   </div>
-  <h2>Robonomics Blockchain</h2><div class="grid">
+  <h2>Robonomics Blockchain</h2><p id="chain-time" class="muted">Unavailable</p><div class="grid">
     <div class="card"><strong id="chain-queuedBatches">Unavailable</strong><span>Queued batches</span></div>
     <div class="card"><strong id="chain-lastFinalizedAt">Unavailable</strong><span>Last finalized batch</span></div>
     <div class="card"><strong id="chain-lastFinalizedBlock">Unavailable</strong><span>Last batch block</span></div>

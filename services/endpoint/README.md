@@ -190,14 +190,26 @@ fixed-origin `sensors.social` link; invalid IDs remain non-clickable text.
 The endpoint's status collector calls configured private Cloud Run service
 URLs using ADC-backed OIDC ID tokens. Set `PUBSUB_BROADCASTER_URL`,
 `HEARTBEAT_TRACKER_URL`, `BATCHER_URL`, and `BLOCKCHAIN_ANCHOR_URL` to the
-service HTTPS URLs. Production has no unauthenticated fallback: missing or
-invalid configuration is shown as unknown. Local development defaults to the
-service ports on `127.0.0.1`. Collection is cached and deduplicated per endpoint
+service HTTPS URLs. ID tokens are only sent to HTTPS origins that match
+`STATUS_ALLOWED_UPSTREAM_HOSTS` (comma-separated exact hostnames or
+`*.suffix` patterns) or, when that variable is unset, Cloud Run `*.run.app`
+hostnames; the check runs before credentials are requested. Production has no
+unauthenticated fallback: missing, disallowed, or invalid configuration is
+shown as unknown. Local development defaults to the service ports on
+`127.0.0.1`, honoring `PUBSUB_BROADCASTER_HEALTH_PORT`,
+`HEARTBEAT_TRACKER_HEALTH_PORT`, `BATCHER_HEALTH_PORT`, and
+`BLOCKCHAIN_ANCHOR_HEALTH_PORT`. Collection is cached and deduplicated per endpoint
 instance, not synchronized across Cloud Run instances.
 
 ### GET /api/status, /api/status/sensors, /api/status/network
 
-Return sanitized same-origin JSON snapshots with observation timestamps.
+Return sanitized same-origin JSON snapshots with freshness metadata:
+`observedAt` is when the upstream state was measured, `fetchedAt` is when the
+collector read it, and `stale: true` means a refresh failed and the last valid
+observation (at most `STATUS_STALE_MAX_AGE_MS`, default 5 minutes, old) is being
+served; the network response reports this per section. Sensor snapshots are
+validated before `available: true`; a malformed or incomplete upstream response
+is `available: false`, never an empty list.
 Missing measurements are `null` or unavailable, never fabricated as zero.
 Snapshots remain HTTP 200 when a monitored service is unavailable. The
 collector applies bounded probes and classifies readiness using `/ready`;

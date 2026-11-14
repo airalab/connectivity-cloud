@@ -51,6 +51,26 @@ describe('renderStatusPage', () => {
     expect(html).not.toMatch(/:[0-9]{4}\/(health|metrics)/);
   });
 
+  it('ships syntactically valid inline dashboard code', () => {
+    const script = /<script>([\s\S]*)<\/script>/.exec(renderStatusPage())?.[1];
+    expect(script).toBeTruthy();
+    expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it('distinguishes observation from fetch time and flags retained data as stale', () => {
+    const html = renderStatusPage();
+    for (const tab of ['overview', 'sensors', 'network']) {
+      expect(html).toContain(`id="${tab}-stale"`);
+    }
+    expect(html).toContain("'Observed ' + clock(data.observedAt)");
+    expect(html).toContain("'fetched ' + clock(data.fetchedAt)");
+    expect(html).toContain(
+      "setStale(tab, 'Stale data: the latest refresh failed"
+    );
+    expect(html).toContain('data-stale');
+    expect(html).not.toContain("'Updated '");
+  });
+
   it('inlines the Robonomics logo for light and dark themes', () => {
     const html = renderStatusPage();
     expect(html).toContain(STATUS_LOGO_LIGHT_SVG);

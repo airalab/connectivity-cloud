@@ -172,6 +172,9 @@ export function createEndpointApp(
     targets:
       options.statusUrls ??
       (options.statusTargets ?? []).map(({ name }) => ({ name })),
+    localPorts: Object.fromEntries(
+      (options.statusTargets ?? []).map(({ name, port }) => [name, port])
+    ),
     checkEndpointReadiness: async () => {
       const checks = Object.values(options.readinessChecks ?? {});
       await Promise.all(checks.map((check) => check()));

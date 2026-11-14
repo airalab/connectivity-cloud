@@ -132,7 +132,9 @@ are returned as `null`; status reads are cached for 15 seconds and do not affect
 service readiness.
 
 After a successful on-chain finalization, the service writes the observation to
-Redis asynchronously with a monotonic block-height check. A Redis or RPC
+Redis asynchronously with a monotonic check on (block number, extrinsic index),
+so two batches finalized in the same block keep the later one while an older
+observation can never overwrite a newer one. A Redis or RPC
 observation failure is logged but does not fail the transaction or delay its
 Kafka offset commit. Duplicate skips do not update this observation. Set the
 shared `REDIS_*` connection variables used by the endpoint/heartbeat tracker

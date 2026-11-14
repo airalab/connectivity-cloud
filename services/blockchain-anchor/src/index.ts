@@ -95,21 +95,53 @@ interface OptionBytesCodec {
   unwrap?: () => { toU8a: (isBare?: boolean) => Uint8Array };
 }
 
-const STORE_FINALIZED_OBSERVATION_SCRIPT = `
+/**
+ * Stores a finalized batch observation unless a newer one is already stored.
+ *
+ * Observations are ordered by block number, then by extrinsic index within the
+ * block, so two batches finalized in the same block keep the later one. An
+ * unknown extrinsic index is sent as -1 and never overrides a known one.
+ *
+ * KEYS[1] = status hash key
+ * ARGV[1] = block number, ARGV[2] = block number (display), ARGV[3] = block hash
+ * ARGV[4] = batch id, ARGV[5] = observed-at timestamp, ARGV[6] = extrinsic index
+ */
+export const STORE_FINALIZED_OBSERVATION_SCRIPT = `
 local key = KEYS[1]
 local incoming = ARGV[1]
+local incomingIndex = tonumber(ARGV[6]) or -1
 local current = redis.call('HGET', key, 'lastFinalizedBlockNumber')
-if current and (#current > #incoming or (#current == #incoming and current >= incoming)) then
-  return 0
+if current then
+  if #current > #incoming then
+    return 0
+  end
+  if #current == #incoming then
+    if current > incoming then
+      return 0
+    end
+    if current == incoming then
+      local currentIndex = tonumber(redis.call('HGET', key, 'lastFinalizedExtrinsicIndex')) or -1
+      if currentIndex > incomingIndex then
+        return 0
+      end
+    end
+  end
 end
 redis.call('HSET', key,
   'lastFinalizedBlockNumber', incoming,
   'lastFinalizedBlock', ARGV[2],
   'lastFinalizedBlockHash', ARGV[3],
   'lastBatchId', ARGV[4],
-  'lastFinalizedAt', ARGV[5])
+  'lastFinalizedAt', ARGV[5],
+  'lastFinalizedExtrinsicIndex', ARGV[6])
 return 1
 `;
+
+interface FinalizedExtrinsic {
+  blockHash: string;
+  /** Position of the extrinsic within its block, when reported by the node. */
+  extrinsicIndex: number | null;
+}
 
 interface KafkaOffsetAdmin {
   metadata(options: { topics: string[]; autocreateTopics?: boolean }): Promise<{
@@ -480,7 +512,7 @@ async function sendSetPayloadExtrinsic(
   suri: string,
   nodeId: number,
   payload: Uint8Array
-): Promise<string> {
+): Promise<FinalizedExtrinsic> {
   logDebug('preparing set_payload extrinsic', {
     nodeId,
     payload_size: payload.length,
@@ -535,7 +567,10 @@ async function sendSetPayloadExtrinsic(
 
           // Check for errors in events
           if (!api.events.system?.ExtrinsicFailed) {
-            resolve(result.status.asFinalized.toString());
+            resolve({
+              blockHash: result.status.asFinalized.toString(),
+              extrinsicIndex: result.txIndex ?? null,
+            });
             return;
           }
 
@@ -566,7 +601,10 @@ async function sendSetPayloadExtrinsic(
             return;
           }
 
-          resolve(result.status.asFinalized.toString());
+          resolve({
+            blockHash: result.status.asFinalized.toString(),
+            extrinsicIndex: result.txIndex ?? null,
+          });
         } else if (result.isError) {
           if (unsub) {
             unsub();
@@ -661,7 +699,7 @@ export function createBlockchainAnchorService(
     if (client) await closeRedisClient(client);
   };
   const recordFinalizedObservation = (
-    blockHash: string,
+    { blockHash, extrinsicIndex }: FinalizedExtrinsic,
     batchId: string
   ): void => {
     const currentApi = api;
@@ -682,7 +720,8 @@ export function createBlockchainAnchorService(
           header.number.toString(),
           blockHash,
           batchId,
-          observedAt
+          observedAt,
+          extrinsicIndex ?? -1
         ),
         2000
       );
@@ -912,7 +951,7 @@ export function createBlockchainAnchorService(
                     }
                   );
                 } else {
-                  const finalizedBlockHash = await sendSetPayloadExtrinsic(
+                  const finalizedExtrinsic = await sendSetPayloadExtrinsic(
                     api!,
                     keyring!,
                     config.suri,
@@ -922,7 +961,7 @@ export function createBlockchainAnchorService(
 
                   metrics.anchored += 1;
                   recordFinalizedObservation(
-                    finalizedBlockHash,
+                    finalizedExtrinsic,
                     payload.batchId
                   );
 

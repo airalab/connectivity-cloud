@@ -31,6 +31,24 @@ export interface StatusCollectorOptions {
   now?: () => number;
   fetch?: typeof globalThis.fetch;
   getIdToken?: (audience: string) => Promise<string>;
+  /**
+   * Hostnames (exact, or `*.suffix`) that may receive Google-signed ID tokens.
+   * Defaults to `STATUS_ALLOWED_UPSTREAM_HOSTS`; when empty, only Cloud Run
+   * `*.run.app` hostnames are accepted.
+   */
+  allowedHosts?: string[];
+  /** Health ports of local (non-production) fallback targets, by service name. */
+  localPorts?: Record<string, number>;
+  /** Maximum age of a retained last-good observation served as stale. */
+  staleMaxAgeMs?: number;
+}
+
+interface Snapshot<T> {
+  value: T;
+  /** When the upstream was actually read. */
+  fetchedAt: number;
+  /** True when a failed refresh is being covered by an older observation. */
+  stale: boolean;
 }
 
 interface ProbeResult {
@@ -59,7 +77,34 @@ const DEFAULT_PORTS: Record<string, number> = {
   'blockchain-anchor': 3050,
 };
 
-function safeTargetUrl(value: string | undefined): URL | undefined {
+const CLOUD_RUN_HOSTNAME =
+  /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.run\.app$/;
+
+function hostnameAllowed(hostname: string, allowedHosts: string[]): boolean {
+  if (allowedHosts.length === 0) return CLOUD_RUN_HOSTNAME.test(hostname);
+  return allowedHosts.some((pattern) =>
+    pattern.startsWith('*.')
+      ? hostname.endsWith(pattern.slice(1)) &&
+        hostname.length > pattern.length - 1
+      : hostname === pattern
+  );
+}
+
+function parseHostList(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Accepts only origins that may receive a Google-signed ID token: allowlisted
+ * (or Cloud Run) HTTPS origins, or plain-HTTP localhost outside production.
+ */
+function safeTargetUrl(
+  value: string | undefined,
+  allowedHosts: string[]
+): URL | undefined {
   if (!value) return undefined;
   let url: URL;
   try {
@@ -72,7 +117,6 @@ function safeTargetUrl(value: string | undefined): URL | undefined {
     url.protocol === 'http:' &&
     process.env.NODE_ENV !== 'production';
   if (
-    (!isLocal && url.protocol !== 'https:') ||
     url.username ||
     url.password ||
     url.search ||
@@ -81,12 +125,15 @@ function safeTargetUrl(value: string | undefined): URL | undefined {
   ) {
     return undefined;
   }
+  if (isLocal) return url;
+  if (
+    url.protocol !== 'https:' ||
+    url.port !== '' ||
+    !hostnameAllowed(url.hostname, allowedHosts)
+  ) {
+    return undefined;
+  }
   return url;
-}
-
-function localDefaultUrl(name: string): string | undefined {
-  const port = DEFAULT_PORTS[name];
-  return port ? `http://127.0.0.1:${port}` : undefined;
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -97,6 +144,114 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function nonNegativeNumber(value: unknown): number | null {
+  const number = finiteNumber(value);
+  return number !== null && number >= 0 ? number : null;
+}
+
+function validTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value));
+}
+
+interface ParsedSensorPage {
+  observedAt: string;
+  summary: {
+    sensorsOnline: number;
+    sensorsTotalTracked: number;
+    avgUptimeSeconds: number;
+    maxUptimeSeconds: number;
+    onlineWindowMs: number;
+  };
+  sensors: Array<{
+    sensorId: string;
+    online: boolean;
+    firstSeen: string;
+    lastSeen: string;
+    uptimeSeconds: number;
+  }>;
+  total: number;
+  nextCursor: string | null;
+  uptimeSummarySampled: boolean;
+}
+
+/**
+ * Validates a heartbeat-tracker `/status/sensors` snapshot. Returns null for
+ * anything malformed or incomplete so it can never pass for an empty list.
+ */
+function parseSensorPage(
+  body: Record<string, unknown>,
+  limit: number
+): ParsedSensorPage | null {
+  const summary = asObject(body.summary);
+  if (!summary || !Array.isArray(body.sensors)) return null;
+  const sensorsOnline = nonNegativeNumber(summary.sensors_online);
+  const sensorsTotalTracked = nonNegativeNumber(summary.sensors_total_tracked);
+  const avgUptimeSeconds = nonNegativeNumber(summary.avg_uptime_seconds);
+  const maxUptimeSeconds = nonNegativeNumber(summary.max_uptime_seconds);
+  const onlineWindowMs = nonNegativeNumber(summary.online_window_ms);
+  const total = nonNegativeNumber(body.total);
+  if (
+    sensorsOnline === null ||
+    sensorsTotalTracked === null ||
+    avgUptimeSeconds === null ||
+    maxUptimeSeconds === null ||
+    onlineWindowMs === null ||
+    total === null ||
+    !validTimestamp(body.observedAt) ||
+    body.sensors.length > limit
+  ) {
+    return null;
+  }
+  let nextCursor: string | null;
+  if (body.nextCursor === null) {
+    nextCursor = null;
+  } else if (
+    typeof body.nextCursor === 'string' &&
+    /^\d{1,15}$/.test(body.nextCursor)
+  ) {
+    nextCursor = body.nextCursor;
+  } else {
+    return null;
+  }
+  const sensors: ParsedSensorPage['sensors'] = [];
+  for (const entry of body.sensors) {
+    const item = asObject(entry);
+    const uptimeSeconds = item ? nonNegativeNumber(item.uptime_seconds) : null;
+    if (
+      !item ||
+      typeof item.sensor_id !== 'string' ||
+      item.sensor_id.length === 0 ||
+      typeof item.online !== 'boolean' ||
+      !validTimestamp(item.first_seen) ||
+      !validTimestamp(item.last_seen) ||
+      uptimeSeconds === null
+    ) {
+      return null;
+    }
+    sensors.push({
+      sensorId: item.sensor_id,
+      online: item.online,
+      firstSeen: item.first_seen,
+      lastSeen: item.last_seen,
+      uptimeSeconds,
+    });
+  }
+  return {
+    observedAt: body.observedAt,
+    summary: {
+      sensorsOnline,
+      sensorsTotalTracked,
+      avgUptimeSeconds,
+      maxUptimeSeconds,
+      onlineWindowMs,
+    },
+    sensors,
+    total,
+    nextCursor,
+    uptimeSummarySampled: body.uptimeSummarySampled === true,
+  };
 }
 
 export function aggregateServiceStates(states: ServiceState[]): ServiceState {
@@ -119,9 +274,19 @@ export function createStatusCollector(options: StatusCollectorOptions) {
     options.probeTimeoutMs ?? positiveEnv('STATUS_PROBE_TIMEOUT_MS', 5_000);
   const failureThreshold =
     options.failureThreshold ?? positiveEnv('STATUS_FAILURE_THRESHOLD', 3);
+  const staleMaxAgeMs =
+    options.staleMaxAgeMs ?? positiveEnv('STATUS_STALE_MAX_AGE_MS', 300_000);
+  const allowedHosts = (
+    options.allowedHosts ??
+    parseHostList(process.env.STATUS_ALLOWED_UPSTREAM_HOSTS)
+  ).map((host) => host.toLowerCase());
   const configuredTargets = new Map(
     options.targets.map((target) => [target.name, target.url])
   );
+  const localDefaultUrl = (name: string): string | undefined => {
+    const port = options.localPorts?.[name] ?? DEFAULT_PORTS[name];
+    return port ? `http://127.0.0.1:${port}` : undefined;
+  };
   const targetUrlFor = (name: string): URL | undefined => {
     const configured = configuredTargets.get(name);
     const value =
@@ -129,10 +294,11 @@ export function createStatusCollector(options: StatusCollectorOptions) {
       (process.env.NODE_ENV === 'production'
         ? undefined
         : localDefaultUrl(name));
-    return safeTargetUrl(value);
+    return safeTargetUrl(value, allowedHosts);
   };
   const failures = new Map<string, number>();
   const caches = new Map<string, Cached<unknown>>();
+  const lastGood = new Map<string, { value: unknown; fetchedAt: number }>();
   const inFlight = new Map<string, Promise<unknown>>();
   const getIdToken = options.getIdToken ?? createGoogleAdcIdTokenProvider();
 
@@ -255,31 +421,60 @@ export function createStatusCollector(options: StatusCollectorOptions) {
           ...outcome,
         };
       });
+      const observedAt = new Date(now()).toISOString();
       return {
         status: aggregateServiceStates(
           services.map((service) => service.state)
         ),
-        observedAt: new Date(now()).toISOString(),
+        observedAt,
+        fetchedAt: observedAt,
         services,
       };
     });
   }
 
-  async function fetchTargetJson(
+  /**
+   * Reads and validates one upstream JSON document. A failed or invalid refresh
+   * falls back to the last valid observation (marked stale) until it exceeds
+   * `staleMaxAgeMs`; after that the data is reported as unavailable.
+   */
+  async function fetchTarget<T>(
     name: string,
     path: string,
-    cacheKey: string
-  ): Promise<Record<string, unknown> | null> {
+    cacheKey: string,
+    parse: (body: Record<string, unknown>) => T | null
+  ): Promise<Snapshot<T> | null> {
     return cached(cacheKey, async () => {
       const targetUrl = targetUrlFor(name);
       if (!targetUrl) return null;
+      let parsed: T | null = null;
       try {
         const result = await requestJson(targetUrl, path);
-        if (result.status !== 200) return null;
-        return result.body;
+        if (result.status === 200) parsed = parse(result.body);
       } catch {
-        return null;
+        parsed = null;
       }
+      const fetchedAt = now();
+      if (parsed !== null) {
+        lastGood.set(cacheKey, { value: parsed, fetchedAt });
+        if (lastGood.size > 100) {
+          const oldest = [...lastGood.entries()].sort(
+            (a, b) => a[1].fetchedAt - b[1].fetchedAt
+          )[0]?.[0];
+          if (oldest) lastGood.delete(oldest);
+        }
+        return { value: parsed, fetchedAt, stale: false };
+      }
+      const previous = lastGood.get(cacheKey);
+      if (previous && fetchedAt - previous.fetchedAt <= staleMaxAgeMs) {
+        return {
+          value: previous.value as T,
+          fetchedAt: previous.fetchedAt,
+          stale: true,
+        };
+      }
+      lastGood.delete(cacheKey);
+      return null;
     });
   }
 
@@ -299,133 +494,113 @@ export function createStatusCollector(options: StatusCollectorOptions) {
         ? params.filter
         : 'all';
     const query = new URLSearchParams({ limit: String(limit), cursor, filter });
-    const body = await fetchTargetJson(
+    const snapshot = await fetchTarget(
       'heartbeat-tracker',
       `/status/sensors?${query}`,
-      `sensors:${limit}:${cursor}:${filter}`
+      `sensors:${limit}:${cursor}:${filter}`,
+      (body) => parseSensorPage(body, limit)
     );
-    if (!body) {
+    if (!snapshot) {
       return {
-        observedAt: new Date(now()).toISOString(),
         available: false,
+        stale: false,
+        observedAt: null,
+        fetchedAt: new Date(now()).toISOString(),
         summary: null,
         sensors: [],
         truncated: false,
       };
     }
-    const source = Array.isArray(body.sensors)
-      ? body.sensors
-      : Array.isArray(body.sensors_uptime)
-        ? body.sensors_uptime
-        : [];
-    const sensors = source
-      .map((item) => asObject(item))
-      .filter((item): item is Record<string, unknown> => !!item)
-      .map((item) => ({
-        sensorId: typeof item.sensor_id === 'string' ? item.sensor_id : null,
-        online: typeof item.online === 'boolean' ? item.online : null,
-        firstSeen: typeof item.first_seen === 'string' ? item.first_seen : null,
-        lastSeen: typeof item.last_seen === 'string' ? item.last_seen : null,
-        uptimeSeconds: finiteNumber(item.uptime_seconds),
-      }))
-      .sort((a, b) => {
-        if (a.online !== b.online) return a.online ? -1 : 1;
-        return (
-          (Date.parse(b.lastSeen ?? '') || 0) -
-          (Date.parse(a.lastSeen ?? '') || 0)
-        );
-      });
-    const summary = asObject(body.summary) ?? body;
-    const total = finiteNumber(body.total);
-    const nextCursor =
-      typeof body.nextCursor === 'string' && /^\d{1,15}$/.test(body.nextCursor)
-        ? body.nextCursor
-        : null;
+    const page = snapshot.value;
+    const sensors = page.sensors.map((sensor) => ({ ...sensor }));
     return {
-      observedAt:
-        typeof body.observedAt === 'string'
-          ? body.observedAt
-          : new Date(now()).toISOString(),
       available: true,
-      summary: {
-        sensorsOnline: finiteNumber(summary.sensors_online),
-        sensorsTotalTracked: finiteNumber(summary.sensors_total_tracked),
-        avgUptimeSeconds: finiteNumber(summary.avg_uptime_seconds),
-        maxUptimeSeconds: finiteNumber(summary.max_uptime_seconds),
-        onlineWindowMs: finiteNumber(summary.online_window_ms),
-      },
-      sensors: sensors.slice(0, limit),
-      total: total ?? sensors.length,
-      totalReturned: Math.min(sensors.length, limit),
+      stale: snapshot.stale,
+      observedAt: page.observedAt,
+      fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
+      summary: page.summary,
+      uptimeSummarySampled: page.uptimeSummarySampled,
+      sensors,
+      total: page.total,
+      totalReturned: sensors.length,
       limit,
       filter,
-      nextCursor,
-      truncated:
-        nextCursor !== null || (total !== null && sensors.length < total),
+      nextCursor: page.nextCursor,
+      truncated: page.nextCursor !== null || sensors.length < page.total,
+    };
+  }
+
+  function section<T extends object>(
+    snapshot: Snapshot<Record<string, unknown>> | null,
+    map: (body: Record<string, unknown>) => T
+  ) {
+    if (!snapshot) return { available: false as const, stale: false };
+    const upstreamObservedAt = snapshot.value.observedAt;
+    return {
+      available: true as const,
+      stale: snapshot.stale,
+      observedAt: validTimestamp(upstreamObservedAt)
+        ? upstreamObservedAt
+        : new Date(snapshot.fetchedAt).toISOString(),
+      fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
+      ...map(snapshot.value),
     };
   }
 
   async function collectNetwork() {
-    const [pubsub, anchor] = await Promise.all([
-      fetchTargetJson('pubsub-broadcaster', '/metrics', 'pubsub-metrics'),
-      fetchTargetJson('blockchain-anchor', '/status', 'anchor-status'),
+    const [pubsubSnapshot, anchorSnapshot] = await Promise.all([
+      fetchTarget(
+        'pubsub-broadcaster',
+        '/metrics',
+        'pubsub-metrics',
+        (body) => body
+      ),
+      fetchTarget(
+        'blockchain-anchor',
+        '/status',
+        'anchor-status',
+        (body) => body
+      ),
     ]);
+    const pubsub = section(pubsubSnapshot, (body) => ({
+      connectedPeerCount: finiteNumber(body.connectedPeerCount),
+      minConnectedPeers: finiteNumber(body.minConnectedPeers),
+      kafkaPaused:
+        typeof body.kafkaPaused === 'boolean' ? body.kafkaPaused : null,
+      publishSuccess: finiteNumber(body.publishSuccess),
+      publishFailure: finiteNumber(body.publishFailure),
+      pauseCount: finiteNumber(body.pauseCount),
+      resumeCount: finiteNumber(body.resumeCount),
+      scope: 'process-local',
+    }));
+    const text = (value: unknown): string | null =>
+      typeof value === 'string' ? value : null;
+    const blockchain = section(anchorSnapshot, (anchor) => ({
+      queuedBatches: finiteNumber(anchor.queuedBatches),
+      lastFinalizedAt: text(anchor.lastFinalizedAt),
+      lastFinalizedObservationStale:
+        typeof anchor.lastFinalizedObservationStale === 'boolean'
+          ? anchor.lastFinalizedObservationStale
+          : null,
+      lastFinalizedBlock: text(anchor.lastFinalizedBlock),
+      lastBatchId: text(anchor.lastBatchId),
+      freeBalance: text(anchor.freeBalance),
+      tokenSymbol: text(anchor.tokenSymbol),
+      tokenDecimals: finiteNumber(anchor.tokenDecimals),
+      bestBlock: text(anchor.bestBlock),
+      finalizedBlock: text(anchor.finalizedBlock),
+      finalizationGap: finiteNumber(anchor.finalizationGap),
+    }));
+    const observations = [pubsub, blockchain]
+      .map((entry) => ('observedAt' in entry ? entry.observedAt : null))
+      .filter((value): value is string => value !== null)
+      .sort();
     return {
-      observedAt: new Date(now()).toISOString(),
-      pubsub: pubsub
-        ? {
-            available: true,
-            connectedPeerCount: finiteNumber(pubsub.connectedPeerCount),
-            minConnectedPeers: finiteNumber(pubsub.minConnectedPeers),
-            kafkaPaused:
-              typeof pubsub.kafkaPaused === 'boolean'
-                ? pubsub.kafkaPaused
-                : null,
-            publishSuccess: finiteNumber(pubsub.publishSuccess),
-            publishFailure: finiteNumber(pubsub.publishFailure),
-            pauseCount: finiteNumber(pubsub.pauseCount),
-            resumeCount: finiteNumber(pubsub.resumeCount),
-            scope: 'process-local',
-          }
-        : { available: false },
-      blockchain: anchor
-        ? {
-            available: true,
-            queuedBatches: finiteNumber(anchor.queuedBatches),
-            lastFinalizedAt:
-              typeof anchor.lastFinalizedAt === 'string'
-                ? anchor.lastFinalizedAt
-                : null,
-            lastFinalizedObservationStale:
-              typeof anchor.lastFinalizedObservationStale === 'boolean'
-                ? anchor.lastFinalizedObservationStale
-                : null,
-            lastFinalizedBlock:
-              typeof anchor.lastFinalizedBlock === 'string'
-                ? anchor.lastFinalizedBlock
-                : null,
-            lastBatchId:
-              typeof anchor.lastBatchId === 'string'
-                ? anchor.lastBatchId
-                : null,
-            freeBalance:
-              typeof anchor.freeBalance === 'string'
-                ? anchor.freeBalance
-                : null,
-            tokenSymbol:
-              typeof anchor.tokenSymbol === 'string'
-                ? anchor.tokenSymbol
-                : null,
-            tokenDecimals: finiteNumber(anchor.tokenDecimals),
-            bestBlock:
-              typeof anchor.bestBlock === 'string' ? anchor.bestBlock : null,
-            finalizedBlock:
-              typeof anchor.finalizedBlock === 'string'
-                ? anchor.finalizedBlock
-                : null,
-            finalizationGap: finiteNumber(anchor.finalizationGap),
-          }
-        : { available: false },
+      observedAt: observations[0] ?? null,
+      fetchedAt: new Date(now()).toISOString(),
+      stale: pubsub.stale || blockchain.stale,
+      pubsub,
+      blockchain,
     };
   }
 
