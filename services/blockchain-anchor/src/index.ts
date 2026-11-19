@@ -29,12 +29,13 @@ import {
   loadKafkaSecurityConfig,
   loadRedisConfig,
 } from '@scp/infra';
-import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
+import { ApiPromise, WsProvider } from '@polkadot/api';
 import { blake2AsU8a } from '@polkadot/util-crypto';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import {
   loadBlockchainAnchorConfig,
+  type AnchorSigner,
   type BlockchainAnchorConfig,
 } from './config.js';
 import { logInfo, logWarn, logDebug, logError } from './logger.js';
@@ -374,15 +375,14 @@ function timeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 
 async function observeBlockchain(
   api: ApiPromise,
-  keyring: Keyring,
-  suri: string,
+  signer: AnchorSigner,
   admin: Admin | null,
   redis: Awaited<ReturnType<typeof createRedisClient>> | null,
   groupId: string,
   now: () => number = Date.now
 ): Promise<BlockchainAnchorStatus> {
   const result = emptyStatus(now);
-  const address = keyring.addFromUri(suri).address;
+  const address = signer.address;
   const key =
     process.env.BLOCKCHAIN_ANCHOR_STATUS_REDIS_KEY ??
     'blockchain-anchor:v1:last-finalized';
@@ -508,8 +508,7 @@ async function publishOversizedToDlq(
  */
 async function sendSetPayloadExtrinsic(
   api: ApiPromise,
-  keyring: Keyring,
-  suri: string,
+  signer: AnchorSigner,
   nodeId: number,
   payload: Uint8Array
 ): Promise<FinalizedExtrinsic> {
@@ -518,9 +517,8 @@ async function sendSetPayloadExtrinsic(
     payload_size: payload.length,
   });
 
-  const account = keyring.addFromUri(suri);
   logDebug('account loaded', {
-    address: account.address,
+    address: signer.address,
   });
 
   // Call cps.setPayload(node_id, Some(payload))
@@ -532,14 +530,14 @@ async function sendSetPayloadExtrinsic(
   logInfo('submitting set_payload extrinsic', {
     nodeId,
     payload_size: payload.length,
-    from: account.address,
+    from: signer.address,
   });
 
   return new Promise((resolve, reject) => {
     let unsub: (() => void) | null = null;
 
     extrinsic
-      .signAndSend(account, (result) => {
+      .signAndSend(signer, (result) => {
         logDebug('extrinsic status update', {
           status: result.status.type,
           isFinalized: result.isFinalized,
@@ -632,7 +630,7 @@ async function sendSetPayloadExtrinsic(
 }
 
 export function createBlockchainAnchorService(
-  config: BlockchainAnchorConfig = loadBlockchainAnchorConfig(),
+  config: BlockchainAnchorConfig,
   deps: BlockchainAnchorDeps = {}
 ): BlockchainAnchorService {
   const consumer =
@@ -661,7 +659,6 @@ export function createBlockchainAnchorService(
     deps.createHealthServer ?? startHealthAndMetricsServer;
 
   let api: ApiPromise | null = null;
-  let keyring: Keyring | null = null;
   let started = false;
   let runPromise: Promise<void> | null = null;
   let healthServer: Server | null = null;
@@ -740,15 +737,13 @@ export function createBlockchainAnchorService(
     }
     if (statusInFlight) return statusInFlight;
     const currentApi = api;
-    const currentKeyring = keyring;
-    if (!currentApi || !currentKeyring) {
+    if (!currentApi) {
       return emptyStatus();
     }
     const statusRedis = await timeout(getStatusRedis(), 1500).catch(() => null);
     statusInFlight = observeBlockchain(
       currentApi,
-      currentKeyring,
-      config.suri,
+      config.signer,
       admin,
       statusRedis,
       config.consumerGroupId
@@ -793,9 +788,6 @@ export function createBlockchainAnchorService(
           substrateWsUrl: config.substrateWsUrl,
         });
 
-        // Initialize keyring
-        keyring = new Keyring({ type: 'sr25519' });
-        logInfo('keyring initialized');
         admin =
           deps.createAdmin?.() ??
           new Admin({
@@ -953,8 +945,7 @@ export function createBlockchainAnchorService(
                 } else {
                   const finalizedExtrinsic = await sendSetPayloadExtrinsic(
                     api!,
-                    keyring!,
-                    config.suri,
+                    config.signer,
                     config.nodeId,
                     payload.payload
                   );
@@ -1033,7 +1024,6 @@ export function createBlockchainAnchorService(
         await closeStatusRedis().catch(() => undefined);
         await api?.disconnect();
         api = null;
-        keyring = null;
         logInfo('startup rollback complete');
         throw error;
       }
@@ -1064,7 +1054,6 @@ export function createBlockchainAnchorService(
 
       await api?.disconnect();
       api = null;
-      keyring = null;
 
       await producer.close().catch(() => undefined);
       await admin?.close().catch(() => undefined);
@@ -1159,7 +1148,9 @@ function startHealthAndMetricsServer(
 }
 
 export async function startBlockchainAnchor(): Promise<BlockchainAnchorService> {
-  const service = createBlockchainAnchorService();
+  const service = createBlockchainAnchorService(
+    await loadBlockchainAnchorConfig()
+  );
   await service.start();
   logInfo('service started (direct run)');
   return service;

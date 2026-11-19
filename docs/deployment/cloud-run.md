@@ -41,7 +41,8 @@ Use one runtime service account per deployment with least privilege:
 
 - Kafka: `roles/managedkafka.client` on the project. Authentication uses the Cloud Run service-account identity via Application Default Credentials; **do not** ship a service-account JSON key (`GOOGLE_APPLICATION_CREDENTIALS` is rejected at startup). Restrict topics/consumer groups with Kafka ACLs where supported.
 - The blockchain-anchor status Admin client needs read-only metadata, end-offset, and consumer-group offset permissions for `telemetry.batched.v1` and `BLOCKCHAIN_ANCHOR_GROUP_ID`. It does not consume records or commit offsets.
-- Secret Manager: `roles/secretmanager.secretAccessor` only on the Redis AUTH secret and the Redis CA secret.
+- Secret Manager: `roles/secretmanager.secretAccessor` only on the Redis AUTH secret, the Redis CA secret and (blockchain-anchor only) the signing-seed secret.
+- blockchain-anchor reads its signing seed/mnemonic from the file named by `BLOCKCHAIN_ANCHOR_SURI_FILE`; mount it from Secret Manager, e.g. `--set-env-vars "BLOCKCHAIN_ANCHOR_SURI_FILE=/var/run/secrets/anchor/suri" --set-secrets "/var/run/secrets/anchor/suri=anchor-suri:latest"`.
 - Never put the Redis AUTH string or certificates in `.env`, the Dockerfile, Cloud Build substitutions or build arguments.
 
 ```bash

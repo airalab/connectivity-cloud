@@ -21,12 +21,13 @@ import {
   getQueuedBatchCount,
 } from '../src/index.js';
 import type { BlockchainAnchorConfig } from '../src/config.js';
+import { aliceSigner } from './signer.js';
 
 const config: BlockchainAnchorConfig = {
   kafkaBrokers: ['localhost:9092'],
   consumerGroupId: 'blockchain-anchor-v1',
   substrateWsUrl: 'ws://localhost:9944',
-  suri: '//Alice',
+  signer: aliceSigner,
   nodeId: 0,
   healthPort: 3050,
   maxPayloadBytes: 8192,
@@ -102,6 +103,7 @@ describe('blockchain status observation', () => {
     });
     const consumer = {
       async consume() {
+        // eslint-disable-next-line require-yield
         return (async function* () {
           await closed;
         })();

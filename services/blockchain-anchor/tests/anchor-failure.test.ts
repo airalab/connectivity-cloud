@@ -24,6 +24,7 @@ import type { Consumer } from '@platformatic/kafka';
 import { describe, expect, it } from 'vitest';
 import { createBlockchainAnchorService } from '../src/index.js';
 import type { BlockchainAnchorConfig } from '../src/config.js';
+import { aliceSigner } from './signer.js';
 
 function testConfig(
   overrides: Partial<BlockchainAnchorConfig> = {}
@@ -32,7 +33,7 @@ function testConfig(
     kafkaBrokers: ['localhost:9092'],
     consumerGroupId: 'blockchain-anchor-v1',
     substrateWsUrl: 'ws://localhost:9944',
-    suri: '//Alice',
+    signer: aliceSigner,
     nodeId: 0,
     healthPort: 3053,
     maxPayloadBytes: 8192,

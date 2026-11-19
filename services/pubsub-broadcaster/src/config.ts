@@ -64,7 +64,7 @@ export function loadPubsubBroadcasterConfig(
       env.PORT ?? env.PUBSUB_BROADCASTER_HEALTH_PORT,
       3020
     ),
-    pubsubTopic: env.PUBSUB_TOPIC ?? 'sensors.social/telemetry/v1',
+    pubsubTopic: env.PUBSUB_TOPIC ?? 'sensors.social/v1',
     reservedPeers: parseList(env.PUBSUB_RESERVED_PEERS),
     minConnectedPeers: parsePositiveInt(env.PUBSUB_MIN_CONNECTED_PEERS, 0),
     libp2pPrivateKeySeedHex: env.PUBSUB_LIBP2P_PRIVATE_KEY_SEED_HEX,

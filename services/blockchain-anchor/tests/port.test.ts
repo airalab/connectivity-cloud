@@ -15,39 +15,45 @@
  */
 import { describe, expect, it } from 'vitest';
 import { loadBlockchainAnchorConfig } from '../src/config.js';
+import { writeSeedFile } from './seed-file.js';
 
 describe('blockchain-anchor health port', () => {
   const base: NodeJS.ProcessEnv = {
     BLOCKCHAIN_ANCHOR_NODE_ID: '0',
-    BLOCKCHAIN_ANCHOR_SURI: '//Alice',
+    BLOCKCHAIN_ANCHOR_SURI_FILE: writeSeedFile('//Alice'),
   };
 
-  it('defaults to 3050', () => {
-    expect(loadBlockchainAnchorConfig(base).healthPort).toBe(3050);
+  it('defaults to 3050', async () => {
+    expect((await loadBlockchainAnchorConfig(base)).healthPort).toBe(3050);
   });
 
-  it('uses BLOCKCHAIN_ANCHOR_HEALTH_PORT when PORT is not set', () => {
+  it('uses BLOCKCHAIN_ANCHOR_HEALTH_PORT when PORT is not set', async () => {
     expect(
-      loadBlockchainAnchorConfig({
-        ...base,
-        BLOCKCHAIN_ANCHOR_HEALTH_PORT: '4001',
-      }).healthPort
+      (
+        await loadBlockchainAnchorConfig({
+          ...base,
+          BLOCKCHAIN_ANCHOR_HEALTH_PORT: '4001',
+        })
+      ).healthPort
     ).toBe(4001);
   });
 
-  it('prefers Cloud Run PORT over BLOCKCHAIN_ANCHOR_HEALTH_PORT', () => {
+  it('prefers Cloud Run PORT over BLOCKCHAIN_ANCHOR_HEALTH_PORT', async () => {
     expect(
-      loadBlockchainAnchorConfig({
-        ...base,
-        PORT: '8080',
-        BLOCKCHAIN_ANCHOR_HEALTH_PORT: '4001',
-      }).healthPort
+      (
+        await loadBlockchainAnchorConfig({
+          ...base,
+          PORT: '8080',
+          BLOCKCHAIN_ANCHOR_HEALTH_PORT: '4001',
+        })
+      ).healthPort
     ).toBe(8080);
   });
 
-  it('falls back to the default when PORT is not a positive integer', () => {
+  it('falls back to the default when PORT is not a positive integer', async () => {
     expect(
-      loadBlockchainAnchorConfig({ ...base, PORT: 'not-a-number' }).healthPort
+      (await loadBlockchainAnchorConfig({ ...base, PORT: 'not-a-number' }))
+        .healthPort
     ).toBe(3050);
   });
 });

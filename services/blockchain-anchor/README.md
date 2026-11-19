@@ -56,7 +56,7 @@ Environment variables:
 - `KAFKA_BROKERS` - Kafka broker addresses (default: `localhost:9092`)
 - `BLOCKCHAIN_ANCHOR_GROUP_ID` - Kafka consumer group ID (default: `blockchain-anchor-v1`)
 - `BLOCKCHAIN_ANCHOR_NODE_ID` - **Required** - CPS node ID to update with payload
-- `BLOCKCHAIN_ANCHOR_SURI` - **Required** - Account seed/mnemonic for signing transactions
+- `BLOCKCHAIN_ANCHOR_SURI_FILE` - **Required** - Path to a file containing the account seed/mnemonic/SURI for signing transactions (surrounding whitespace is trimmed)
 - `SUBSTRATE_WS_URL` - Substrate WebSocket endpoint (default: `ws://localhost:9944`)
 - `BLOCKCHAIN_ANCHOR_HEALTH_PORT` - Health check server port (default: `3050`); Cloud Run `PORT` takes precedence
 - `BLOCKCHAIN_ANCHOR_STATUS_REDIS_KEY` - Redis hash used for the last finalized batch observation (default: `blockchain-anchor:v1:last-finalized`)
@@ -101,7 +101,8 @@ pnpm --filter @scp/blockchain-anchor build
 ```bash
 # Set required environment variables
 export BLOCKCHAIN_ANCHOR_NODE_ID=0
-export BLOCKCHAIN_ANCHOR_SURI="//Alice"
+echo -n "//Alice" > /tmp/anchor-suri
+export BLOCKCHAIN_ANCHOR_SURI_FILE=/tmp/anchor-suri
 export SUBSTRATE_WS_URL="ws://localhost:9944"
 
 pnpm --filter @scp/blockchain-anchor build
