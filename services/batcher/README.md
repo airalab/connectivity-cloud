@@ -10,7 +10,7 @@ anchoring.
 - **Input**: `telemetry.authorized.v1` from Kafka
 - **Output**: `telemetry.batched.v1` (carries a zstd-compressed, chain-ready payload)
 - **Autocommit**: Disabled (commit only after the batch is durably produced)
-- **Concurrency**: Single active flush per instance (single-flight); a timer-triggered flush cannot publish the same batch as a size/lag-triggered flush
+- **Concurrency**: Single active flush per instance (single-flight); a timer-triggered flush cannot publish the same batch as a size-triggered flush
 - **Shutdown**: Waits for any in-flight flush and flushes the remaining batch before closing resources
 
 The batcher serializes each detached batch as a `SignedEnvelopeBatch`
@@ -28,8 +28,8 @@ IPFS/CID indirection in between.
 ## Batching Strategy
 
 - **Size-based flush**: Flushes when `BATCHER_BATCH_SIZE` messages are accumulated
-- **Lag-based flush**: When consumer lag is high (>= batch size), flushes early to catch up
-- **Time-based flush**: When lag is low, a bounded timer (`BATCHER_BATCH_TIMEOUT_MS`) flushes partial batches
+- **Time-based flush**: A timer (`BATCHER_BATCH_TIMEOUT_MS`) starts when the first event of a batch arrives and flushes the partial batch when it fires. Later events do not reset it, so continuous traffic cannot postpone the flush
+- **No lag-based flush**: Kafka consumer lag never triggers a flush of an undersized batch; under backlog the batcher keeps filling full batches, which minimizes blockchain transactions
 - **Shutdown flush**: Any pending batch is flushed during graceful shutdown to avoid replay
 
 The current batch is atomically detached before any asynchronous work, so
@@ -42,7 +42,7 @@ concurrent flush paths can never publish the same batch twice.
 - `BATCHER_SOURCE` (default: `batcher`)
 - `BATCHER_HEALTH_PORT` (default: `3041`); Cloud Run `PORT` takes precedence
 - `BATCHER_BATCH_SIZE` (default: `10`) - Maximum messages per batch
-- `BATCHER_BATCH_TIMEOUT_MS` (default: `30000`) - Timeout for partial batches under low load
+- `BATCHER_BATCH_TIMEOUT_MS` (default: `30000`) - Maximum wait, measured from the first pending event, before a partial batch is flushed
 - `ANCHOR_MAX_PAYLOAD_BYTES` (default: `8192`) - Maximum compressed payload size per emitted batch; larger batches are recursively split, shared default defined in `@scp/core`
 
 ## Metrics
@@ -60,7 +60,7 @@ Available at `http://localhost:3041/metrics`:
 
 1. Consume `telemetry.authorized.v1` event from Kafka
 2. Extract `SignedEnvelope` from payload and add to the current batch
-3. When the batch is full, lag is high, or the flush timer fires:
+3. When the batch is full or the flush timer fires:
    - Serialize the batch as a `SignedEnvelopeBatch` protobuf and zstd-compress it
    - If the compressed payload exceeds `ANCHOR_MAX_PAYLOAD_BYTES`, recursively split the batch until every sub-batch fits (oversized single events go to the DLQ)
    - Wrap each fitted sub-batch in a `TelemetryBatchedPayload` (`batch_id`, `payload`, `uncompressed_size`, `compressed_size`, `payload_hash`, `event_count`, `sensor_ids`)

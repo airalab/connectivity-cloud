@@ -309,30 +309,6 @@ async function produceBatch(
   }
 }
 
-/**
- * Get total lag (pending messages) across all partitions for given topics.
- */
-async function getTotalLag(
-  consumer: Consumer,
-  topics: string[]
-): Promise<number> {
-  try {
-    const lagMap = await consumer.getLag({ topics });
-    let total = 0;
-    for (const partitionLags of lagMap.values()) {
-      for (const lag of partitionLags) {
-        total += Number(lag);
-      }
-    }
-    return total;
-  } catch (error) {
-    logWarn('failed to get consumer lag', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return 0;
-  }
-}
-
 export function createBatcherService(
   config: BatcherConfig = loadBatcherConfig(),
   deps: BatcherDeps = {}
@@ -473,20 +449,23 @@ export function createBatcherService(
             }
             // The flusher serializes concurrent calls and re-attaches the batch
             // on failure; swallow the error here (already logged).
-            await flusher.flush().catch(() => {
-              if (!shouldStop && flusher.size() > 0) {
-                resetBatchTimer();
-              }
-            });
+            await flusher.flush().catch(() => undefined);
+            // Anything left pending (failed batch re-attached, or items added
+            // during the flush) must still be flushed within the timeout.
+            if (!shouldStop && flusher.size() > 0) {
+              startBatchTimer();
+            }
           };
 
-          const resetBatchTimer = () => {
+          // Arms the timeout from the first pending event. It is never reset by
+          // later events, so continuous traffic cannot postpone a partial flush.
+          const startBatchTimer = () => {
             if (batchTimer) {
-              clearTimeout(batchTimer);
-              batchTimer = null;
+              return;
             }
 
             batchTimer = setTimeout(async () => {
+              batchTimer = null;
               if (flusher.size() > 0) {
                 logDebug('batch timeout reached', {
                   batch_size: flusher.size(),
@@ -497,34 +476,13 @@ export function createBatcherService(
           };
 
           const maybeFlush = async () => {
-            // Check if batch is full.
             if (flusher.size() >= config.batchSize) {
               logDebug('batch size reached', {
                 batch_size: flusher.size(),
               });
               await flushBatch();
-            } else {
-              const lag = await getTotalLag(consumer, [
-                TELEMETRY_TOPICS.AUTHORIZED,
-              ]);
-
-              logDebug('consumer lag check', {
-                lag,
-                batch_size: flusher.size(),
-                batch_max: config.batchSize,
-              });
-
-              if (lag < config.batchSize && flusher.size() > 0) {
-                // Not enough messages waiting, start/reset timer.
-                resetBatchTimer();
-              } else if (lag >= config.batchSize) {
-                // Many messages waiting, flush current batch to catch up.
-                logInfo('flushing batch early due to lag', {
-                  batch_size: flusher.size(),
-                  lag,
-                });
-                await flushBatch();
-              }
+            } else if (flusher.size() > 0) {
+              startBatchTimer();
             }
           };
 
